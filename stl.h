@@ -1,0 +1,27 @@
+#pragma once
+
+#include <algorithm>
+#include <array>
+#include <cassert>
+#include <cfloat>
+#include <climits>
+#include <cmath>
+#include <concepts>
+#include <cstdint>
+#include <filesystem>
+#include <functional>
+#include <H5Cpp.h>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <numbers>
+#include <random>
+#include <ranges>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <valarray>
+#include <vector>
+#include <CLI/CLI.hpp>
+#include <opencv2/opencv.hpp>
