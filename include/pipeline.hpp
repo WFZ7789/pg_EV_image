@@ -22,7 +22,7 @@ struct Request {
     std::string color;
     std::filesystem::path output;
     std::string projection = "geographic";
-    bool grid = true;
+    bool grid = false;
     double grid_step = 0;
     double center_lat = 0;
     double center_lon = 0;

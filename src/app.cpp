@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
     std::string inspect_path, data, geo, aux, mode, color, output, projection = "geographic", job;
     int band = 0, width = 3840;
     double center_lat = 0, center_lon = 0, half_range = 0, grid_step = 0;
-    bool no_grid = false;
+    bool grid = false;
     inspect->add_option("data", inspect_path)->required();
     render->add_option("-d,--data", data)->required();
     render->add_option("-g,--geo", geo);
@@ -102,7 +102,7 @@ int main(int argc, char** argv) {
     render->add_option("--center-lon", center_lon);
     render->add_option("--half-range", half_range);
     render->add_option("--grid-step", grid_step);
-    render->add_flag("--no-grid", no_grid);
+    render->add_flag("--grid", grid);
     mosaic->add_option("--job", job)->required();
     CLI11_PARSE(app, argc, argv);
     try {
@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
         request.output = output; request.projection = projection; request.width = width;
         request.center_lat = center_lat; request.center_lon = center_lon;
         if (render->get_option("--half-range")->count()) request.half_range = half_range;
-        request.grid_step = grid_step; request.grid = !no_grid;
+        request.grid_step = grid_step; request.grid = grid;
         H5::H5File source(data, H5F_ACC_RDONLY);
         std::string sat = read_str_attr(source.openGroup("/").openAttribute("Satellite Name"));
         std::string sensor = read_str_attr(source.openAttribute("Sensor Identification Code"));

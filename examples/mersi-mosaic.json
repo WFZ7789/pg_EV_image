@@ -14,9 +14,7 @@
   "band": 24,
   "map": {
     "projection": "geographic",
-    "width": 3840,
-    "grid": 1,
-    "grid_step": 0
+    "width": 3840
   },
   "output": "../output/mersi-mosaic.png"
 }
