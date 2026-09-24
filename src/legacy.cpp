@@ -9,7 +9,7 @@
 using namespace std;
 using namespace H5;
 
-int main(int argc, char** argv) {
+int legacy_main(int argc, char** argv) {
     CLI::App app{"FY 系列图像处理"};
 
     string mode;

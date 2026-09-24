@@ -19,58 +19,72 @@ pair<vector<hsize_t>, DataSpace> read_dims(const auto& src) {
 /// @brief  读取    3D  数据集指定波段  (UINT16 ->  float   定标)
 inline pair<vector<float>, vector<hsize_t>> rer_base(const DataSet& src, hsize_t bdid) {
     auto dims = read_dims(src);
-    assert(bdid < dims.first[0]);
+    if (dims.first.size() != 3 || bdid >= dims.first[0])
+        throw invalid_argument("数据集维度或波段编号无效");
     hsize_t start[3]{bdid, 0, 0}, count[3]{1, dims.first[1], dims.first[2]};
     DataSpace rd = src.getSpace(), ms(3, count);
     rd.selectHyperslab(H5S_SELECT_SET, count, start);
     vector<float> res(static_cast<size_t>(count[1] * count[2]));
     src.read(res.data(), PredType::NATIVE_FLOAT, ms, rd);
     Attribute slope_att = src.openAttribute("Slope"), itcpt_att = src.openAttribute("Intercept");
-    vector<float> slope(dims.first[0]), intercept(dims.first[0]);
+    auto slope_count = slope_att.getSpace().getSimpleExtentNpoints();
+    auto intercept_count = itcpt_att.getSpace().getSimpleExtentNpoints();
+    if ((slope_count != 1 && slope_count <= bdid) ||
+        (intercept_count != 1 && intercept_count <= bdid))
+        throw invalid_argument("定标系数数量与波段不匹配");
+    vector<float> slope(slope_count), intercept(intercept_count);
     slope_att.read(PredType::NATIVE_FLOAT, slope.data());
     itcpt_att.read(PredType::NATIVE_FLOAT, intercept.data());
-    if (slope_att.getSpace().getSimpleExtentNpoints() <= bdid)
-        bdid = 0;
     for (auto& value : res)
-        value = value * slope[bdid] + intercept[bdid];
+        value = value * slope[slope_count == 1 ? 0 : bdid] + intercept[intercept_count == 1 ? 0 : bdid];
     return {res, dims.first};
 }
 
 /// @brief  读取    3D  数据集指定波段  (FLOAT  ->  float   定标)
 inline pair<vector<float>, vector<hsize_t>> rer_f32_base(const DataSet& src, hsize_t bdid) {
     auto dims = read_dims(src);
-    assert(bdid < dims.first[0]);
+    if (dims.first.size() != 3 || bdid >= dims.first[0])
+        throw invalid_argument("数据集维度或波段编号无效");
     hsize_t start[3]{bdid, 0, 0}, count[3]{1, dims.first[1], dims.first[2]};
     DataSpace rd = src.getSpace(), ms(3, count);
     rd.selectHyperslab(H5S_SELECT_SET, count, start);
     vector<float> res(static_cast<size_t>(count[1] * count[2]));
     src.read(res.data(), PredType::NATIVE_FLOAT, ms, rd);
     Attribute slope_att = src.openAttribute("Slope"), itcpt_att = src.openAttribute("Intercept");
-    int acpc = slope_att.getSpace().getSimpleExtentNpoints() == 1 ? 0 : bdid;
-    vector<float> slope(dims.first[0]), intercept(dims.first[0]);
+    auto slope_count = slope_att.getSpace().getSimpleExtentNpoints();
+    auto intercept_count = itcpt_att.getSpace().getSimpleExtentNpoints();
+    if ((slope_count != 1 && slope_count <= bdid) ||
+        (intercept_count != 1 && intercept_count <= bdid))
+        throw invalid_argument("定标系数数量与波段不匹配");
+    vector<float> slope(slope_count), intercept(intercept_count);
     slope_att.read(PredType::NATIVE_FLOAT, slope.data());
     itcpt_att.read(PredType::NATIVE_FLOAT, intercept.data());
     for (auto& value : res)
-        value = value * slope[acpc] + intercept[acpc];
+        value = value * slope[slope_count == 1 ? 0 : bdid] + intercept[intercept_count == 1 ? 0 : bdid];
     return {res, dims.first};
 }
 
 /// @brief 读取 3D 数据集指定波段 -> float 定标)
 inline pair<vector<float>, vector<hsize_t>> rer_f32_pst_bdid_base(const DataSet& src, hsize_t bdid) {
     auto dims = read_dims(src);
-    assert(bdid < dims.first[2]);
+    if (dims.first.size() != 3 || bdid >= dims.first[2])
+        throw invalid_argument("数据集维度或波段编号无效");
     hsize_t start[3]{0, 0, bdid}, count[3]{dims.first[0], dims.first[1], 1};
     DataSpace rd = src.getSpace(), ms(3, count);
     rd.selectHyperslab(H5S_SELECT_SET, count, start);
     vector<float> res(static_cast<size_t>(count[0] * count[1]));
     src.read(res.data(), PredType::NATIVE_FLOAT, ms, rd);
     Attribute slope_att = src.openAttribute("Slope"), itcpt_att = src.openAttribute("Intercept");
-    int acpc = slope_att.getSpace().getSimpleExtentNpoints() == 1 ? 0 : bdid;
-    vector<float> slope(dims.first[0]), intercept(dims.first[0]);
+    auto slope_count = slope_att.getSpace().getSimpleExtentNpoints();
+    auto intercept_count = itcpt_att.getSpace().getSimpleExtentNpoints();
+    if ((slope_count != 1 && slope_count <= bdid) ||
+        (intercept_count != 1 && intercept_count <= bdid))
+        throw invalid_argument("定标系数数量与波段不匹配");
+    vector<float> slope(slope_count), intercept(intercept_count);
     slope_att.read(PredType::NATIVE_FLOAT, slope.data());
     itcpt_att.read(PredType::NATIVE_FLOAT, intercept.data());
     for (auto& value : res)
-        value = value * slope[acpc] + intercept[acpc];
+        value = value * slope[slope_count == 1 ? 0 : bdid] + intercept[intercept_count == 1 ? 0 : bdid];
     return {res, dims.first};
 }
 
@@ -369,7 +383,7 @@ inline pair<pair<vector<float>, vector<hsize_t>>, DataSet> read_fy4(
     return {{std::move(res), raw.second}, src};
 }
 
-pair<vector<float>, vector<hsize_t>> interp(const pair<vector<float>, vector<hsize_t>>& inp,
+inline pair<vector<float>, vector<hsize_t>> interp(const pair<vector<float>, vector<hsize_t>>& inp,
                                             hsize_t target_rows, hsize_t target_cols) {
     const int source_rows = static_cast<int>(inp.second[0]);
     const int source_cols = static_cast<int>(inp.second[1]);
@@ -382,7 +396,7 @@ pair<vector<float>, vector<hsize_t>> interp(const pair<vector<float>, vector<hsi
     return {std::move(result), {target_rows, target_cols}};
 }
 
-vector<float> interp(const vector<float>& inp, const vector<hsize_t>& inp_dims, hsize_t target_rows,
+inline vector<float> interp(const vector<float>& inp, const vector<hsize_t>& inp_dims, hsize_t target_rows,
                      hsize_t target_cols) {
     const int source_rows = static_cast<int>(inp_dims[0]);
     const int source_cols = static_cast<int>(inp_dims[1]);

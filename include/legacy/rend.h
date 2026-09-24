@@ -7,6 +7,7 @@
 
 #include    <opencv2/imgproc.hpp>
 #include    <opencv2/opencv.hpp>
+#include    <optional>
 
 #define OUTPUT_DIR  "./output/"
 //#define OUTNAME_EQ_FILENAME
@@ -14,6 +15,38 @@
 #define JPEG_OUTPUT
 
 using namespace std;
+
+struct CapturedScene {
+    vector<cv::Vec3b> pixels;
+    vector<float> lat;
+    vector<float> lon;
+    vector<string> labels;
+    string extra_label;
+    int rows = 0;
+    int cols = 0;
+    RenderConfig scale;
+    bool has_colorbar = false;
+    vector<float> values;
+    std::function<cv::Vec3b(double, const RenderConfig&)> mapper;
+    vector<uint8_t> valid;
+};
+
+inline thread_local CapturedScene* active_scene_capture = nullptr;
+inline thread_local std::optional<float> active_forced_scale;
+
+inline std::string legacy_output_path(const std::string& name, const std::string& suffix) {
+    std::filesystem::path path(name);
+    if (!path.has_parent_path()) path = std::filesystem::path(OUTPUT_DIR) / path;
+    if (path.extension().empty()) path += suffix;
+    if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
+    return path.string();
+}
+
+inline void legacy_write_image(const std::string& path, const cv::Mat& image,
+                               const std::vector<int>& params = {}) {
+    if (!cv::imwrite(path, image, params))
+        throw std::runtime_error("图片写入失败: " + path);
+}
 
 #ifdef TIFF_OUTPUT
 constexpr const char* Output_suffix{".tiff"};
@@ -30,6 +63,20 @@ inline void rend_cl(const vector<cv::Vec3b>& comp, const vector<float>& lat, con
                     const std::function<cv::Vec3b(double, const RenderConfig&)>& qcolor_fn = nullptr,
                     const RenderConfig& cfg = {},
                     bool crop_area = false, double tlat = 0, double tlon = 0, double half = 7.5) {
+    if (active_scene_capture) {
+        if (active_scene_capture->rows != 0)
+            throw runtime_error("产品生成了多幅图像，不能作为单景拼接输入");
+        auto values = std::move(active_scene_capture->values);
+        *active_scene_capture = {comp, lat, lon, lbls, ESlbl, rows, cols, cfg, bool(qcolor_fn)};
+        active_scene_capture->values = std::move(values);
+        active_scene_capture->mapper = qcolor_fn;
+        if (active_scene_capture->values.size() == comp.size()) {
+            active_scene_capture->valid.resize(comp.size());
+            for (size_t i = 0; i < comp.size(); ++i)
+                active_scene_capture->valid[i] = std::isfinite(active_scene_capture->values[i]);
+        }
+        return;
+    }
     if (outname.empty())
     {
 #ifndef OUTNAME_EQ_FILENAME
@@ -39,7 +86,7 @@ inline void rend_cl(const vector<cv::Vec3b>& comp, const vector<float>& lat, con
 #endif
     }
     std::filesystem::create_directories(OUTPUT_DIR);
-    string full_path = string(OUTPUT_DIR) + outname + Output_suffix;
+    string full_path = legacy_output_path(outname, Output_suffix);
 
     const vector<cv::Vec3b>* comp_view = &comp;
     const vector<float>* lat_view = &lat;
@@ -158,9 +205,9 @@ inline void rend_cl(const vector<cv::Vec3b>& comp, const vector<float>& lat, con
     }
 
 #ifdef  TIFF_OUTPUT
-    cv::imwrite(full_path, canvas, {cv::IMWRITE_TIFF_COMPRESSION, 8});
+    legacy_write_image(full_path, canvas, {cv::IMWRITE_TIFF_COMPRESSION, 8});
 #else
-    cv::imwrite(full_path, canvas);
+    legacy_write_image(full_path, canvas);
 #endif
 }
 
@@ -170,6 +217,8 @@ inline void rend_cl_16(const vector<cv::Vec<uint16_t, 3>>& comp,
                        string outname, const vector<string>& lbls, const string& ESlbl,
                        int rows, int cols, bool crop_area = false, double tlat = 0,
                        double tlon = 0, double half = 7.5) {
+    if (active_scene_capture)
+        throw invalid_argument("16 位产品暂不支持拼接");
     if (outname.empty())
     {
 #ifndef OUTNAME_EQ_FILENAME
@@ -179,7 +228,7 @@ inline void rend_cl_16(const vector<cv::Vec<uint16_t, 3>>& comp,
 #endif
     }
     std::filesystem::create_directories(OUTPUT_DIR);
-    string full_path = string(OUTPUT_DIR) + outname + ".tif";
+    string full_path = legacy_output_path(outname, ".tif");
 
     const vector<cv::Vec<uint16_t, 3>>* comp_view = &comp;
     const vector<float>* lat_view = &lat;
@@ -280,7 +329,7 @@ inline void rend_cl_16(const vector<cv::Vec<uint16_t, 3>>& comp,
     cv::cvtColor(text8, text_mask, cv::COLOR_BGR2GRAY);
     cv::threshold(text_mask, text_mask, 0, 255, cv::THRESH_BINARY);
     text16.copyTo(canvas, text_mask);
-    cv::imwrite(full_path, canvas, {
+    legacy_write_image(full_path, canvas, {
                     cv::IMWRITE_TIFF_COMPRESSION, cv::IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE
                 });
 }
@@ -300,7 +349,7 @@ inline void rend_cl_matrix(const vector<cv::Vec3b>& comp,
 #endif
     }
     std::filesystem::create_directories(OUTPUT_DIR);
-    string full_path = string(OUTPUT_DIR) + outname + Output_suffix;
+    string full_path = legacy_output_path(outname, Output_suffix);
 
     cout << "绘制区域大小：" << rows << "*"
             << cols << ", " << comp.size() << " 像素" << endl;
@@ -359,11 +408,11 @@ inline void rend_cl_matrix(const vector<cv::Vec3b>& comp,
     }
 
 #ifdef  TIFF_OUTPUT
-    cv::imwrite(full_path, canvas, {
+    legacy_write_image(full_path, canvas, {
                     cv::IMWRITE_TIFF_COMPRESSION, cv::IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE
                 });
 #else
-    cv::imwrite(full_path, canvas);
+    legacy_write_image(full_path, canvas);
 #endif
 }
 
@@ -379,7 +428,7 @@ inline void rend_cl_matrix_16(const vector<cv::Vec<uint16_t, 3>>& comp,
 #endif
     }
     std::filesystem::create_directories(OUTPUT_DIR);
-    string full_path = string(OUTPUT_DIR) + outname + ".tif";
+    string full_path = legacy_output_path(outname, ".tif");
 
     cout << "绘制区域大小：" << rows << "*"
             << cols << ", " << comp.size() << " 像素" << endl;
@@ -419,7 +468,7 @@ inline void rend_cl_matrix_16(const vector<cv::Vec<uint16_t, 3>>& comp,
 
     cv::Rect roi(x_offset, y_offset, cols, rows);
     img.copyTo(canvas(roi));
-    cv::imwrite(full_path, canvas, {
+    legacy_write_image(full_path, canvas, {
                     cv::IMWRITE_TIFF_COMPRESSION, cv::IMWRITE_TIFF_COMPRESSION_ADOBE_DEFLATE
                 });
 }
@@ -441,6 +490,7 @@ void rend(const vector<hsize_t>& dims, const vector<float>& mat, const vector<fl
           string outname, const vector<string>& lbls, const string& ESlbl, QColorFn qcolor,
           const RenderConfig& cfg, bool crop_area = false, double tlat = 0, double tlon = 0,
           double half = 7.5) {
+    if (active_scene_capture) active_scene_capture->values = mat;
     vector<cv::Vec3b> comp(mat.size());
     for (size_t i = 0; i < mat.size(); i++)
         comp[i] = isnan(mat[i]) ? cv::Vec3b(0, 0, 0) : qcolor(mat[i], cfg);

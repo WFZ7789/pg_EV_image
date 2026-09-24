@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "inputs": [
+    {
+      "data": "../data/FY3F_MERSI_GRAN_L1_YYYYMMDD_HHMM_1000M_V0.HDF",
+      "geo": "../data/FY3F_MERSI_GRAN_L1_YYYYMMDD_HHMM_GEO1K_V0.HDF"
+    },
+    {
+      "data": "../data/FY3F_MERSI_GRAN_L1_YYYYMMDD_HHMM_1000M_V0.HDF",
+      "geo": "../data/FY3F_MERSI_GRAN_L1_YYYYMMDD_HHMM_GEO1K_V0.HDF"
+    }
+  ],
+  "mode": "E",
+  "band": 24,
+  "map": {
+    "projection": "geographic",
+    "width": 3840,
+    "grid": 1,
+    "grid_step": 0
+  },
+  "output": "../output/mersi-mosaic.png"
+}

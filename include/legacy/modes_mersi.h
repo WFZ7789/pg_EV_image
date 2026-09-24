@@ -26,7 +26,7 @@ inline void mode_TSG(Context& ctx) {
 inline void mode_E(Context& ctx) {
     if (kSatConfigs.find(ctx.sat) == kSatConfigs.end())
         throw invalid_argument("不支持的卫星: " + ctx.sat);
-    const auto& cfgsat = kSatConfigs.at(ctx.sat).bands[ctx.band_id];
+    const auto& cfgsat = kSatConfigs.at(ctx.sat).bands.at(ctx.band_id);
     auto [mat, emissive] = read_emissive(ctx.file, cfgsat, ctx.sat, ctx.isQkm);
     for (auto& i : mat.first)
         i += K2c;
@@ -37,6 +37,7 @@ inline void mode_E(Context& ctx) {
     cfg.hival = min(*mmx.second, 40.0f);
 
     auto qcolor = pick_color(ctx.color_scheme, color_rbtop_wv);
+    if (active_scene_capture) active_scene_capture->values = mat.first;
     vector<cv::Vec3b> comp(mat.first.size());
     for (size_t i = 0; i < mat.first.size(); ++i)
         comp[i] = isnan(mat.first[i]) ? cv::Vec3b(0, 0, 0) : qcolor(mat.first[i], cfg);
@@ -50,7 +51,7 @@ inline void mode_E(Context& ctx) {
 inline void mode_R(Context& ctx) {
     auto solarZ = read_solar_zenith(ctx.geofile, ctx.isQkm, ctx.scln, ctx.pps);
     double Des = read_earth_sun_distance(ctx.file);
-    const auto& cfgsat = kSatConfigs.at(ctx.sat).bands[ctx.band_id];
+    const auto& cfgsat = kSatConfigs.at(ctx.sat).bands.at(ctx.band_id);
     auto [mat, refl] = read_reflectance_configured(ctx.file, cfgsat,
                                                    get_viscal_name(ctx.sat), ctx.isQkm);
     apply_solar_correction(mat.first, solarZ.first, Des, ctx.sat);
@@ -112,6 +113,8 @@ inline void mode_RT(Context& ctx) {
     apply_solar_correction(red.first, solarZ.first, Des, ctx.sat);
 
     float dvf = percentile(blue.first, 99);
+    if (active_scene_capture) active_scene_capture->values = blue.first;
+    if (active_forced_scale) dvf = *active_forced_scale;
     vector<cv::Vec3b> comp(N);
     for (size_t i = 0; i < N; ++i)
     {
@@ -184,6 +187,8 @@ inline void mode_RY(Context& ctx) {
     // apply_solar_correction(b103.first, solarZ.first, Des, ctx.sat);
 
     float dvf = percentile(red.first, 99);
+    if (active_scene_capture) active_scene_capture->values = red.first;
+    if (active_forced_scale) dvf = *active_forced_scale;
     vector<cv::Vec3b> comp(N);
     for (size_t i = 0; i < N; ++i)
     {
@@ -302,6 +307,8 @@ inline void mode_RMUL(Context& ctx) {
     apply_solar_correction(refs.first, solarZ.first, Des, ctx.sat);
 
     float mxval = percentile(refs.first, 99);
+    if (active_scene_capture) active_scene_capture->values = refs.first;
+    if (active_forced_scale) mxval = *active_forced_scale;
 
     vector<cv::Vec3b> comp(N);
     for (size_t i = 0; i < N; ++i)

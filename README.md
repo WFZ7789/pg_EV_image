@@ -1,160 +1,57 @@
 # pg_EV_image
 
-风云系列（FY）卫星 HDF5 一级数据图像渲染工具。读取卫星 L1 数据与地理定位文件，
-完成定标、亮温换算、太阳校正后，直接渲染成带标注和色标的彩色图片，适合快速出图、
-调试算法和制作台风等天气过程的分析产品。
+风云卫星 HDF5 图像渲染工具，支持 FY3 MERSI、MWRI、PMR 和 FY4 AGRI/GHI、GIIRS 的现有产品模式，并提供 MERSI 经纬网与连续轨段拼接。
 
-## 支持的卫星与载荷
+## 构建
 
-| 卫星 | 载荷 | 说明 |
-| --- | --- | --- |
-| FY-3D / E / F / G / H | MERSI、MWRI、GIIRS | 极轨，逐轨扫描数据，按经纬度网格重投影 |
-| FY-4A / B | AGRI、GIIRS | 静止轨道，全圆盘，按像素矩阵直接渲染 |
-| FY-3（PMR） | 降水产品 | 从降水产品文件中裁剪目标区域 |
-
-## 快速开始
-
-依赖：CMake（>= 4.0）、C++23 编译器、HDF5（C 和 C++）、OpenCV、TBB、CLI11、ZLIB。
+依赖 CMake 4、C++23、HDF5 C/C++、OpenCV、TBB、CLI11 和 ZLIB。
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --preset release
+cmake --build --preset release -j 4
+ctest --test-dir cmake-build-release --output-on-failure
 ```
 
-基本用法：
+## 使用
+
+查看卫星、载荷和文件别名：
 
 ```bash
-./build/pg_EV_image -m <模式> -d <数据文件> [-g <地理文件>] [-o <输出名>] [-b <波段号>]
+./cmake-build-release/pg_EV_image inspect 数据.HDF
 ```
 
-例如，渲染 FY-3D MERSI 第 24 通道亮温，并在指定位置输出：
+渲染单景 FY3 MERSI 亮温图：
 
 ```bash
-./build/pg_EV_image -m E -d FY3D_MERSI.hdf -b 24 -o mersi_b24
+./cmake-build-release/pg_EV_image render \
+  -m E -b 24 -d 数据.HDF -g 定位.HDF -o output/亮温.png
 ```
 
-输出默认写入 `output/` 目录，格式为 JPEG；未指定 `-o` 时自动使用随机 6 位数字命名。
-格式可在 `rend.h` 顶部通过 `TIFF_OUTPUT` / `JPEG_OUTPUT` 宏切换（还有 TIFF 16 位通道，
-用于 RT16/RTEC16 等模式）。
-
-## 命令行选项
-
-| 选项 | 说明 |
-| --- | --- |
-| `-m, --mode` | 处理模式，必选（见下表） |
-| `-d, --data` | HDF5 数据文件，必选 |
-| `-g, --geo` | 地理定位文件，缺省时与数据文件相同 |
-| `-a, --aux` | 附加文件，FY-4 合成模式用于读取红外/高分辨率通道 |
-| `-o, --out` | 输出文件名（不含扩展名） |
-| `-b, --band-id` | 波段编号（从 0 开始） |
-| `-x, --target-lat` | 目标中心纬度，用于 PMR/MWRI 裁剪 |
-| `-y, --target-lon` | 目标中心经度（0~360），同上 |
-| `-r, --range` | 目标区域半宽（度），默认 7.5 |
-| `--crop` | 按 `-x/-y` 中心裁剪目标区域（MERSI 全模式；FY-4B 4KM 全圆盘仅 RTEC） |
-| `--aq` | 以 `-x/-y` 为中心的正交投影，输出换算为度且投影中心为 (0,0)，可与 `--crop` 配合（裁剪以投影中心为原点） |
-
-## 模式说明
-
-### FY-3 MERSI（mode 分派）
-
-| 模式 | 说明 |
-| --- | --- |
-| `E` | 热辐射模式，单波段亮温（℃），带色标 |
-| `R` | 反射率模式，单波段定标反射率 |
-| `LL` | 微光产品（仅 FY-3E） |
-| `RT` | 假真彩色，蓝/绿/红用 1/2/3 通道 |
-| `RY` | 自定义多波段假彩色（红、短波红外、冰云通道） |
-| `RF` | 反射率 + 热红外融合假彩色 |
-| `RMUL` | 增强型单波段反射率 |
-| `EC` | 多红外波段差分模拟可见光（夜间可用） |
-| `EK` | 水汽 + 红外差分伪可见光变体 |
-| `TSG` | 纬度热力图调试模式 |
-
-### FY-4 AGRI / GIIRS
-
-| 模式 | 说明 |
-| --- | --- |
-| `R` / `Re` / `Rr` | 反射率（表观/定标后） |
-| `E` | 单波段亮温 |
-| `EC` | 红外差分模拟可见光 |
-| `RF` | 反射率 + 红外融合 |
-| `RY` / `RX` | 自然色变体 |
-| `RTpp` | 假真彩色（0.825 μm） |
-| `RTEC` / `RT+EC` | 全天候模式：白天真彩 + 夜间红外模拟，含瑞利/TRC 校正 |
-| `RTEC16` / `RT16` | 同上，16 位 TIFF 输出 |
-| `RTG` / `AGHI_ALD` | GHI 专属真彩 / 全天融合 |
-| `R`（GIIRS） | 可见光 DN 二次定标渲染 |
-| `LW` / `MW` | GIIRS 单通道亮温（按波数做普朗克逆变换） |
-| `IRall` | GIIRS 全通道批量出图 |
-
-> FY-4B 的 `--crop` 支持 AGRI 各分辨率全圆盘及 GIIRS 的各模式；
-> AGRI 区域裁剪使用主文件对应分辨率的 NOM 投影参数，GIIRS 使用 GEO 经纬度网格。
-> 经纬度通过文件私有属性（`NOMCenterLon`、`NOMSatHeight`、`dEA`、`dObRecFlat`、
-> `dSamplingAngle`、`dSteppingAngle`）按 NOM 标称投影反算，不依赖文件名解析。
-
-### MWRI（微波成像仪）与 PMR
-
-这些模式以 `-x/-y` 为中心裁剪目标区域（默认 ±7.5°），适合台风分析：
-
-| 模式 | 说明 |
-| --- | --- |
-| `S` / `W` | 探测通道 / 窗区通道亮温，plasma 色标 |
-| `W84` | 89/37 GHz 窗区组合（PCT89 散射信号） |
-| `TCX` | 台风结构增强：PCT89 + 极化差 + 散射差 |
-| `TCN` | 118 GHz 三层暖心 |
-| `TCN2` | 53.75 V + 118 GHz 暖心增强 |
-| `TCS` | 冰散射频率差（89-36 / 36-18 / 23-18） |
-| `TCR` | 降水：PCT89 / 23 V / 36 V |
-| `PMR` | 降水产品模式，渲染 zFactor 校正后的地表回波 |
-
-FY-3D MWRI 示例：
+指定区域和正交投影：
 
 ```bash
-./build/pg_EV_image -m W -d FY3D_MWRID_GBAL_L1_20260805_2021_010KM_MS.HDF \
-  -b 8 -x -5 -y 110 -r 7.5 -o fy3d_mwri_89v
+./cmake-build-release/pg_EV_image render \
+  -m E -b 24 -d 数据.HDF -g 定位.HDF \
+  --projection orthographic --center-lat 35 --center-lon 140 \
+  --half-range 20 --width 2400 --grid-step 5 -o output/区域.png
 ```
 
-FY-3D 的 10 个窗区通道编号按文档顺序从 0 开始：
-`10.65V、10.65H、18.7V、18.7H、23.8V、23.8H、36.5V、36.5H、89V、89H`。
-这 10 个编号与 FY-3H MWRI-II 的 `Window Channel` 0~9 一致；但 FY-3H 的
-`Sounding Channel` 0~11 是另一套 `50.30/52.61/53.24/53.75 GHz` 和
-`118.7503 GHz` 探测通道，不能与 FY-3D 的编号互换。
-FY-3D 文件使用根目录下的 `Geolocation/Latitude`、`Geolocation/Longitude` 和
-`Calibration/EARTH_OBSERVE_BT_10_to_89GHz` 数据集；亮温按照文件属性完成
-`Tb = DN × Slope + Intercept` 定标（样例中为 `DN × 0.01 + 327.68 K`）。
-FY-3D 的单通道图使用 `W` 模式，实际通道由 `-b` 指定；`S`、`TCN`、`TCN2`
-仅适用于 FY-3H 的探测通道定义。
+拼接相邻 MERSI 轨段：复制 [示例任务](examples/mersi-mosaic.json)，为每段填写真实的数据和 GEO 路径，然后运行：
 
-## 项目结构
+```bash
+./cmake-build-release/pg_EV_image mosaic --job 任务.json
+```
 
-| 文件 | 职责 |
-| --- | --- |
-| `main.cpp` | CLI 解析、卫星/传感器识别、数据分派、方位投影 |
-| `read.h` | HDF5 读取、Slope/Intercept 定标、查表定标、地理插值 |
-| `phys.h` | 普朗克逆变换、日地距离、太阳校正等物理量 |
-| `config.h` | 各卫星波段 → 数据集路径与定标系数索引的配置表 |
-| `color.h` | 色标：plasma、亮温色标、增强可见光色标等 |
-| `draw.h` | 网格顶点计算、百分位数、方向性阴影模拟 |
-| `rend.h` | 画布渲染、经纬度标注、色标绘制、输出格式宏 |
-| `modes_*.h` | 各载荷/卫星的模式实现与模式分派 |
+任务中 `inputs` 至少两组。单次任务要求同一卫星、载荷和分辨率；产品与波段在任务级统一设置。程序按观测时间排序，重叠处选靠近扫描中心的有效像元。亮温 `E` 以及真彩/假彩 `RT`、`RY`、`RMUL` 模式使用整个任务的共同显示范围。时间间隔超过十分钟会提示，未覆盖区域保持空白。
 
-## 工作原理简述
+地图默认宽度为 3840 像素，自动确定经纬网间距；可用 `--no-grid` 关闭。输出按扩展名选择 PNG、JPEG 或 TIFF。输出目录不存在时会创建；失败会返回非零状态。FY4 原生圆盘和其他载荷继续使用原生渲染路径，正交投影与经纬网当前作用于 MERSI 地图流程。
 
-1. 打开数据文件后先读取根属性（卫星名、传感器代码、文件别名）确定数据家族，再按
-   MWRI / FY-4 / GIIRS / MERSI 分派。
-2. 波段数据按数据集自带 `Slope`/`Intercept` 属性线性定标；FY-4 数据按 DN 查
-   `Calibration/CAL*` 表；反射率通道再做二次多项式定标（GIIRS 可见光为三次）。
-3. 反射率乘以 `Des²/cos(SZA)` 做日地距离与太阳天顶角校正；发射通道经普朗克逆变换
-   得到亮温，再乘 TBB 转换系数（FY-3D 为 A/B 两组系数）。
-4. 渲染分两条路：极轨数据按每个像元的经纬度计算画布坐标，用 OpenCV 填充四边形
-   （类似 pcolormesh 的无缝网格）；FY-4 全圆盘数据直接按像素矩阵拷贝。
-5. 画布统一加经纬度刻度、时间/卫星标注，需要时绘制右侧色标，最后写 JPEG/TIFF。
+## 现有产品
 
-## 小提示
+MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`EK`、`TSG`。
+FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
+GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
 
-- MWRI 波段编号从 0 开始，与 `-b` 一一对应；选错编号不会报错但结果无意义。
-- FY-4 的 RTEC/RY/RF 等合成模式可用 `-a` 提供更高分辨率或红外辅助文件，代码会自动
-  做三次插值对齐分辨率。
-- `--aq` 与 `-x/-y` 配合使用，代码注释写的是“蒸饺投影”，实际实现是正交投影
-  （orthographic），可用于从目标点俯视的效果。
-- 无 `-o` 时文件名随机，连续调试时建议显式指定输出名，便于对照不同参数。
+单图命令从旧版 `-m E -d 数据.HDF -g 定位.HDF -b 24 -o 名称` 改为 `render -m E -d 数据.HDF -g 定位.HDF -b 24 -o output/名称.png`。旧版 `--aq` 改为 `--projection orthographic`，`-x/-y/-r` 改为 `--center-lat/--center-lon/--half-range`。产品含义保持原样。
+
+代码结构与新增产品方法见 [架构说明](docs/ARCHITECTURE.md)。

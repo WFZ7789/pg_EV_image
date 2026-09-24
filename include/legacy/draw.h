@@ -207,11 +207,11 @@ inline cv::Mat apply_directional_shadow_fast(
 }
 
 /// @brief 生成随机输出文件名
-inline string random_output_filename() {
-    string res(6, '\0');
-    static random_device seed;
-    static mt19937 rnd(seed());
-    uniform_int_distribution<> chdis(48, 57);
+inline std::string random_output_filename() {
+    std::string res(6, '\0');
+    static std::random_device seed;
+    static std::mt19937 rnd(seed());
+    std::uniform_int_distribution<> chdis(48, 57);
     for (auto& i : res)
         i = chdis(rnd);
     return res;

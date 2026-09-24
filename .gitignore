@@ -39,12 +39,15 @@
 **/__pycache__/
 **/*.pyc
 **/*.hdf
+**/*.hdf.*
 **/*.h5
 **/*.hdf5
 **/*.nc
 **/*.nc4
 **/*.grib
 **/*.grb
+**/*.dat
+**/*.bin
 **/*.tif
 **/*.tiff
 **/*.png
@@ -60,5 +63,9 @@
 **/cmake-build*/
 **/build*/
 **/output/
+**/data/
+**/datasets/
+**/samples/
+**/fixtures/
 **/.work/
 **/.idea/
