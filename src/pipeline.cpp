@@ -258,10 +258,20 @@ ProjectedPoint GeoProjection::project(double lat, double lon) const {
 
 void inspect(const std::filesystem::path& data) {
     H5::H5File file(data.string(), H5F_ACC_RDONLY);
-    std::cout << "Satellite: " << read_str_attr(file.openGroup("/").openAttribute("Satellite Name")) << '\n';
-    std::cout << "Sensor: " << read_str_attr(file.openAttribute("Sensor Identification Code")) << '\n';
+    auto satellite = read_str_attr(file.openGroup("/").openAttribute("Satellite Name"));
+    auto sensor = read_str_attr(file.openAttribute("Sensor Identification Code"));
+    std::cout << "Satellite: " << satellite << '\n';
+    std::cout << "Sensor: " << sensor << '\n';
     std::cout << "Alias: " << read_str_attr(file.openGroup("/").openAttribute("File Alias Name")) << '\n';
     std::cout << "Data: " << data << '\n';
+    if (sensor.find("MERSI") != std::string::npos)
+        std::cout << "Modes: E R LL RT RY RF RMUL EC EK TSG (实际支持情况依卫星和分辨率而定)\n";
+    else if (sensor.find("MWRI") != std::string::npos)
+        std::cout << "Modes: S W W84 TCX TCN TCN2 TCS TCR (依卫星和通道而定)\n";
+    else if (sensor == "GIIRS")
+        std::cout << "Modes: R LW MW IRall\n";
+    else if (satellite.rfind("FY-4",0) == 0)
+        std::cout << "Modes: E R Re Rr EC RF RY RX RTpp RTEC RTEC16 RTG AGHI_ALD\n";
 }
 
 void render(const Request& request) {
@@ -339,6 +349,8 @@ void render(const Request& request) {
     int height = projection.orthographic ? request.width :
         std::max(256, int(std::round(request.width * (bounds.top-bounds.bottom)/(bounds.right-bounds.left))));
     if (height > 16000) throw std::invalid_argument("地图高度超过 16000 像素，请缩小区域或宽度");
+    if (uint64_t(request.width) * height > 80000000)
+        throw std::invalid_argument("地图超过 8000 万像素，请缩小区域或宽度");
     Canvas canvas{bounds,request.width,height};
     cv::Mat3b image(canvas.total_height(),canvas.total_width(),cv::Vec3b(0,0,0));
     cv::Mat1i priority(canvas.total_height(),canvas.total_width(),-1);

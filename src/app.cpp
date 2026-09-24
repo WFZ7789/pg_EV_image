@@ -122,6 +122,8 @@ int main(int argc, char** argv) {
         if (sat.rfind("FY-3",0) == 0 && sensor.find("MERSI") != std::string::npos) {
             fy::render(request); return 0;
         }
+        if (sat.rfind("FY-4",0) == 0 && request.projection == "orthographic")
+            throw std::invalid_argument("FY4 原生圆盘暂不支持正交投影");
         return run_legacy(request);
     } catch (const H5::Exception& error) {
         std::cerr << "HDF5 错误: " << error.getDetailMsg() << '\n'; return 2;
