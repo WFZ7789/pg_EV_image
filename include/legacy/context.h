@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #ifndef PG_EV_IMAGE_CONTEXT_H
 #define PG_EV_IMAGE_CONTEXT_H
 
@@ -22,6 +24,7 @@ struct Context {
     bool aq = false;
     float target_square_size = 7.5;
     bool isQkm = false;
+    bool ec_aux_qkm = false;
     vector<float> lat;
     vector<float> lon;
     int scln = 0;

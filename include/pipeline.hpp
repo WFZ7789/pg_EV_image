@@ -1,5 +1,6 @@
-#pragma once
+/// SPDX-License-Identifier: MIT
 
+#pragma once
 #include "raster.hpp"
 
 #include <filesystem>
@@ -27,7 +28,7 @@ struct Request {
     double center_lat = 0;
     double center_lon = 0;
     std::optional<double> half_range;
-    int width = 3840;
+    int width = 0;
     std::optional<float> forced_scale;
 };
 

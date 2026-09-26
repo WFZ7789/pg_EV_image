@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #ifndef PG_EV_IMAGE_DRAW_H
 #define PG_EV_IMAGE_DRAW_H
 

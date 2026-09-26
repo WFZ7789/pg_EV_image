@@ -1,5 +1,6 @@
-#include "pipeline.hpp"
+/// SPDX-License-Identifier: MIT
 
+#include "pipeline.hpp"
 #include <cmath>
 #include <limits>
 #include <stdexcept>

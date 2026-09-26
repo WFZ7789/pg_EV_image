@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #include "pipeline.hpp"
 #include "legacy_bridge.hpp"
 #include "config.h"
@@ -231,7 +233,8 @@ void draw_grid(cv::Mat3b& image, const Canvas& canvas, const Projection& project
 
 void validate(const Request& request) {
     if (request.inputs.empty() || request.mode.empty()) throw std::invalid_argument("缺少输入或产品模式");
-    if (request.width < 256 || request.width > 16000) throw std::invalid_argument("地图宽度必须在 256 至 16000 之间");
+    if (request.width != 0 && (request.width < 256 || request.width > 16000))
+        throw std::invalid_argument("地图宽度必须为 0（自动）或 256 至 16000");
     if (request.projection != "geographic" && request.projection != "orthographic")
         throw std::invalid_argument("投影仅支持 geographic 或 orthographic");
     if (request.center_lat < -90 || request.center_lat > 90)
@@ -279,6 +282,7 @@ void render(const Request& request) {
     struct Entry { Input input; std::string satellite, sensor, time, resolution; };
     std::vector<Entry> entries;
     Bounds bounds;
+    int native_rows = 0;
     double global_min = std::numeric_limits<double>::infinity();
     double global_max = -std::numeric_limits<double>::infinity();
     bool percentile_mode = request.mode == "RT" || request.mode == "RY" || request.mode == "RMUL";
@@ -289,6 +293,7 @@ void render(const Request& request) {
     Projection projection{request.projection == "orthographic", request.center_lat, anchor};
     for (const Input& input : request.inputs) {
         Scene scene = read_mersi(input, request);
+        native_rows = std::max(native_rows, scene.image.color.rows);
         if (request.mode == "E")
             for (float value : scene.image.values)
                 if (std::isfinite(value)) {
@@ -346,12 +351,14 @@ void render(const Request& request) {
     if (bounds.right-bounds.left <= 0 || bounds.top-bounds.bottom <= 0 ||
         bounds.right-bounds.left > 180)
         throw std::invalid_argument("地图范围无效或跨越超过 180 度，请指定区域中心与半宽");
-    int height = projection.orthographic ? request.width :
-        std::max(256, int(std::round(request.width * (bounds.top-bounds.bottom)/(bounds.right-bounds.left))));
+    const int map_width = request.width != 0 ? request.width :
+        std::max(3840, static_cast<int>(std::lround(native_rows * 1.6)));
+    int height = projection.orthographic ? map_width :
+        std::max(256, int(std::round(map_width * (bounds.top-bounds.bottom)/(bounds.right-bounds.left))));
     if (height > 16000) throw std::invalid_argument("地图高度超过 16000 像素，请缩小区域或宽度");
-    if (uint64_t(request.width) * height > 80000000)
-        throw std::invalid_argument("地图超过 8000 万像素，请缩小区域或宽度");
-    Canvas canvas{bounds,request.width,height};
+    if (uint64_t(map_width) * height > 256000000)
+        throw std::invalid_argument("地图超过 2.56 亿像素，请缩小区域或宽度");
+    Canvas canvas{bounds,map_width,height};
     cv::Mat3b image(canvas.total_height(),canvas.total_width(),cv::Vec3b(0,0,0));
     cv::Mat1i priority(canvas.total_height(),canvas.total_width(),-1);
     DisplayScale shared_scale;
@@ -409,13 +416,15 @@ void render(const Request& request) {
         cv::putText(image,std::to_string(int(std::round(legend_scale.lowval))),{x+38,y1},
                     cv::FONT_HERSHEY_SIMPLEX,.6,{255,255,255},1,cv::LINE_AA);
     }
-    std::string title = entries.front().satellite + " " + request.mode;
+    std::string title = entries.front().satellite + " " + entries.front().sensor + " " + request.mode;
     if (!entries.front().time.empty()) {
         title += " " + display_time(entries.front().time);
         if (entries.size() > 1) title += " - " + display_time(entries.back().time);
     }
-    cv::putText(image,title,{canvas.left_margin,52},cv::FONT_HERSHEY_SIMPLEX,1,
-                {255,255,255},2,cv::LINE_AA);
+    const double title_scale = std::clamp(canvas.width / 3840.0, 1.0, 3.0);
+    const int title_thickness = std::max(2, cvRound(title_scale * 2));
+    cv::putText(image,title,{canvas.left_margin,70},cv::FONT_HERSHEY_SIMPLEX,title_scale,
+                {255,255,255},title_thickness,cv::LINE_AA);
     auto path = request.output.empty() ? std::filesystem::path("output/result.png") : request.output;
     if (path.extension().empty()) path += ".png";
     auto ext = path.extension().string();

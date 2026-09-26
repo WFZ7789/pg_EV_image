@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #ifndef PG_EV_IMAGE_READ_H
 #define PG_EV_IMAGE_READ_H
 
@@ -302,21 +304,24 @@ inline vector<float> read_tbb_trans_coeff(const H5File& file, const string& attr
 /// @brief 读取指定波段的亮温数据   (单位 K)，自动提取 TBB 系数
 /// @param file HDF5 数据文件对象
 /// @param band_cfg 卫星波段配置信息 (需包含 transid 和 mersi_equiv_mid_wn)
+/// @param coefficient_file 可选的定标系数来源文件
 /// @return pair<亮温数据数组,维度信息>
 inline pair<pair<vector<float>, vector<hsize_t>>, DataSet> read_emissive(
     const H5File& file,
-    const SatConfig::BandConfig& band_cfg, const string& sat, bool isqk = false) {
+    const SatConfig::BandConfig& band_cfg, const string& sat, bool isqk = false,
+    const H5File* coefficient_file = nullptr) {
+    const H5File& calibration = coefficient_file ? *coefficient_file : file;
     float A, B;
     if (sat == "FY-3D")
     {
-        auto tbb_a = read_tbb_trans_coeff(file, "TBB_Trans_Coefficient_A");
-        auto tbb_b = read_tbb_trans_coeff(file, "TBB_Trans_Coefficient_B");
+        auto tbb_a = read_tbb_trans_coeff(calibration, "TBB_Trans_Coefficient_A");
+        auto tbb_b = read_tbb_trans_coeff(calibration, "TBB_Trans_Coefficient_B");
         A = tbb_a.at(band_cfg.transid);
         B = tbb_b.at(band_cfg.transid);
     }
     else
     {
-        auto tbb_coeff = read_tbb_trans_coeff(file, "TBB_Trans_Coefficient");
+        auto tbb_coeff = read_tbb_trans_coeff(calibration, "TBB_Trans_Coefficient");
         A = tbb_coeff.at(band_cfg.transid);
         B = tbb_coeff.at(band_cfg.transid + tbb_coeff.size() / 2);
     }
@@ -460,6 +465,16 @@ inline pair<vector<float>, vector<hsize_t>> read_solar_zenith_fy4(const H5File& 
 /// @brief 读取太阳方位角
 inline pair<vector<float>, vector<hsize_t>> read_solar_azimuth(const H5File& geofile) {
     DataSet ds = geofile.openDataSet("Geolocation/SolarAzimuth");
+    return rer2D_base(ds);
+}
+
+/// @brief 读取太阳方位角，按需插值到目标分辨率
+inline pair<vector<float>, vector<hsize_t>> read_solar_azimuth(const H5File& geofile, bool interpolate,
+                                                               int rows, int cols) {
+    DataSet ds = geofile.openDataSet("Geolocation/SolarAzimuth");
+    if (interpolate)
+        return {read_and_interp_geo_i16(geofile, ds, rows, cols),
+                {static_cast<hsize_t>(rows), static_cast<hsize_t>(cols)}};
     return rer2D_base(ds);
 }
 

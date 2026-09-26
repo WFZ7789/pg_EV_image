@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #ifndef PG_EV_IMAGE_MODES_MERSI_H
 #define PG_EV_IMAGE_MODES_MERSI_H
 
@@ -356,16 +358,30 @@ inline void mode_EC(Context& ctx) {
     if (ctx.sat == "FY-3G" || ctx.sat == "FY-3F" || ctx.sat == "FY-3H")
         refclband = lir2band;
 
+    H5File longwave_file = ctx.file;
+    if (ctx.ec_aux_qkm)
+        longwave_file.openFile(ctx.aux_file, H5F_ACC_RDONLY);
+    const bool refcl_qkm = ctx.ec_aux_qkm && !cfg_sat.bands.at(refclband).qkdataset.empty();
     auto [mwir, emsv] =
-            read_emissive(ctx.file, cfg_sat.bands.at(mwirband), ctx.sat, ctx.isQkm);
+            read_emissive(ctx.file, cfg_sat.bands.at(mwirband), ctx.sat, false);
     auto refcl =
-            read_emissive(ctx.file, cfg_sat.bands.at(refclband), ctx.sat, ctx.isQkm).first;
+            read_emissive(refcl_qkm ? longwave_file : ctx.file, cfg_sat.bands.at(refclband),
+                          ctx.sat, refcl_qkm, refcl_qkm ? &ctx.file : nullptr).first;
     auto lir1 =
-            read_emissive(ctx.file, cfg_sat.bands.at(lir1band), ctx.sat, ctx.isQkm).first;
+            read_emissive(longwave_file, cfg_sat.bands.at(lir1band), ctx.sat, ctx.ec_aux_qkm,
+                          ctx.ec_aux_qkm ? &ctx.file : nullptr).first;
     auto lir2 =
-            read_emissive(ctx.file, cfg_sat.bands.at(lir2band), ctx.sat, ctx.isQkm).first;
-    auto solarZ = read_solar_zenith(ctx.geofile, ctx.isQkm, ctx.scln, ctx.pps);
-    auto solarA = read_solar_azimuth(ctx.geofile);
+            read_emissive(longwave_file, cfg_sat.bands.at(lir2band), ctx.sat, ctx.ec_aux_qkm,
+                          ctx.ec_aux_qkm ? &ctx.file : nullptr).first;
+    if (ctx.ec_aux_qkm) {
+        mwir = {interp(mwir.first, {mwir.second[1], mwir.second[2]}, ctx.scln, ctx.pps),
+                {0, static_cast<hsize_t>(ctx.scln), static_cast<hsize_t>(ctx.pps)}};
+        if (!refcl_qkm)
+            refcl = {interp(refcl.first, {refcl.second[1], refcl.second[2]}, ctx.scln, ctx.pps),
+                     {0, static_cast<hsize_t>(ctx.scln), static_cast<hsize_t>(ctx.pps)}};
+    }
+    auto solarZ = read_solar_zenith(ctx.geofile, ctx.ec_aux_qkm, ctx.scln, ctx.pps);
+    auto solarA = read_solar_azimuth(ctx.geofile, ctx.ec_aux_qkm, ctx.scln, ctx.pps);
 
     for (auto& i : mwir.first)
         i += K2c;

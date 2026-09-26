@@ -27,6 +27,16 @@ ctest --test-dir cmake-build-release --output-on-failure
   -m E -b 24 -d 数据.HDF -g 定位.HDF -o output/亮温.png
 ```
 
+FY3 MERSI 的 `EC` 可用 1KM 文件作为主数据，并通过 `--aux` 附加同星、同观测时间的
+250M 文件。此时 10.8/12.0 μm 波段读取原生 250M 数据，其余 EC 输入和 GEO1K
+插值到 250M 网格：
+
+```bash
+./cmake-build-release/pg_EV_image render \
+  -m EC -d 1000M数据.HDF -g GEO1K定位.HDF -a 0250M数据.HDF \
+  -o output/ec_250m.png
+```
+
 指定区域和正交投影：
 
 ```bash
@@ -44,7 +54,12 @@ ctest --test-dir cmake-build-release --output-on-failure
 
 任务中 `inputs` 至少两组。单次任务要求同一卫星、载荷和分辨率；产品与波段在任务级统一设置。程序按观测时间排序，重叠处选靠近扫描中心的有效像元。亮温 `E` 以及真彩/假彩 `RT`、`RY`、`RMUL` 模式使用整个任务的共同显示范围。时间间隔超过十分钟会提示，未覆盖区域保持空白。
 
-地图默认宽度为 3840 像素，默认不画经纬网；使用 `--grid` 开启，间距自动确定，也可用 `--grid-step` 指定。拼接任务用 `map.grid: 1` 开启。输出按扩展名选择 PNG、JPEG 或 TIFF。输出目录不存在时会创建；失败会返回非零状态。FY4 原生圆盘和其他载荷继续使用原生渲染路径，正交投影与经纬网当前作用于 MERSI 地图流程。
+地图宽度默认按原始行数自动确定（至少 3840 像素，完整 250M 轨道通常为 12800 像素），
+也可用 `--width` 显式生成较小预览图。标题中的仪器名直接读取 HDF 的
+`Sensor Identification Code`。默认不画经纬网；使用 `--grid` 开启，间距自动确定，也可用
+`--grid-step` 指定。拼接任务用 `map.grid: 1` 开启。输出按扩展名选择 PNG、JPEG 或 TIFF。
+输出目录不存在时会创建；失败会返回非零状态。FY4 原生圆盘和其他载荷继续使用原生渲染路径，
+正交投影与经纬网当前作用于 MERSI 地图流程。
 
 ## 现有产品
 
@@ -55,3 +70,15 @@ GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`�
 单图命令从旧版 `-m E -d 数据.HDF -g 定位.HDF -b 24 -o 名称` 改为 `render -m E -d 数据.HDF -g 定位.HDF -b 24 -o output/名称.png`。旧版 `--aq` 改为 `--projection orthographic`，`-x/-y/-r` 改为 `--center-lat/--center-lon/--half-range`。产品含义保持原样。
 
 代码结构与新增产品方法见 [架构说明](docs/ARCHITECTURE.md)。
+
+## 许可证
+
+本项目自有代码采用 [MIT License](LICENSE)，包括
+`include/`、`src/`、`tests/` 下的代码、构建配置和根目录的 Python/Shell 脚本。
+第三方组件及其素材保留各自许可证，不因本项目采用 MIT 而重新授权。
+
+允许商用、修改、再分发及闭源使用；复制或分发本软件或其重要部分时，须保留
+版权和许可声明。MIT 不要求公开修改后的源码。卫星输入数据和生成图像的使用权
+不由此代码许可证授予。
+
+依赖许可、核对范围和二进制分发注意事项见 [许可核对记录](docs/LICENSING.md)。

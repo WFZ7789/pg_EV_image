@@ -1,9 +1,21 @@
+/// SPDX-License-Identifier: MIT
+
 #include "legacy_bridge.hpp"
 #include "modes.h"
 
 #include <regex>
 
 namespace fy {
+
+namespace {
+
+std::string observation_start(const H5::H5File& file) {
+    const auto root = file.openGroup("/");
+    return read_str_attr(root.openAttribute("Observing Beginning Date")) + " " +
+           read_str_attr(root.openAttribute("Observing Beginning Time"));
+}
+
+}
 
 Scene read_mersi(const Input& input, const Request& request) {
     if (request.inputs.size() > 1 && input.geo.empty())
@@ -31,13 +43,38 @@ Scene read_mersi(const Input& input, const Request& request) {
             throw std::invalid_argument("数据与 GEO 的观测时间不匹配: " + input.data.string());
     }
     const bool qkm = alias.find("250M") != std::string::npos || alias.find("QKM") != std::string::npos;
-    const auto latitude = geo.openDataSet("Geolocation/Latitude");
-    const auto longitude = geo.openDataSet("Geolocation/Longitude");
+    bool ec_aux_qkm = false;
     int rows = read_u16_attr(file.openAttribute("Scan_Line_number"));
     int cols = read_u16_attr(file.openAttribute("Pixels_per_Scan"));
-    if (qkm && sat == "FY-3D") cols = 8192;
+    if (request.mode == "EC" && !input.aux.empty()) {
+        if (qkm)
+            throw std::invalid_argument("EC 使用 250M 附加数据时，主数据必须是同轨 1KM 文件");
+        H5::H5File aux(input.aux.string(), H5F_ACC_RDONLY);
+        const auto aux_sat = read_str_attr(aux.openGroup("/").openAttribute("Satellite Name"));
+        const auto aux_sensor = read_str_attr(aux.openAttribute("Sensor Identification Code"));
+        const auto aux_alias = read_str_attr(aux.openGroup("/").openAttribute("File Alias Name"));
+        if (aux_sat != sat || aux_sensor != sensor)
+            throw std::invalid_argument("EC 的 250M 附加数据与主数据卫星或载荷不一致");
+        if (observation_start(aux) != observation_start(file))
+            throw std::invalid_argument("EC 的 250M 附加数据与主数据观测时间不一致");
+        if (aux_alias.find("250M") == std::string::npos && aux_alias.find("QKM") == std::string::npos)
+            throw std::invalid_argument("EC 的附加数据必须是 250M 文件");
+        const int lir1_band = sat == "FY-3E" ? 6 : sat == "FY-3G" ? 7 : 24;
+        const int lir2_band = lir1_band + 1;
+        if (!kSatConfigs.contains(sat) || !kSatConfigs.at(sat).bands.contains(lir1_band) ||
+            !kSatConfigs.at(sat).bands.contains(lir2_band) ||
+            kSatConfigs.at(sat).bands.at(lir1_band).qkdataset.empty() ||
+            kSatConfigs.at(sat).bands.at(lir2_band).qkdataset.empty())
+            throw std::invalid_argument("卫星 " + sat + " 的 EC 不支持 250M 10.8/12.0um 附加数据");
+        rows = read_u16_attr(aux.openAttribute("Scan_Line_number"));
+        cols = read_u16_attr(aux.openAttribute("Pixels_per_Scan"));
+        ec_aux_qkm = true;
+    }
+    const auto latitude = geo.openDataSet("Geolocation/Latitude");
+    const auto longitude = geo.openDataSet("Geolocation/Longitude");
+    if ((qkm || ec_aux_qkm) && sat == "FY-3D") cols = 8192;
     std::vector<float> lat, lon;
-    if (qkm) {
+    if (qkm || ec_aux_qkm) {
         lat = read_and_interp_geo_float(geo, latitude, rows, cols);
         lon = read_and_interp_geo_float(geo, longitude, rows, cols, true);
     } else {
@@ -50,6 +87,7 @@ Scene read_mersi(const Input& input, const Request& request) {
                 request.center_lat, request.center_lon};
     ctx.color_scheme = request.color;
     ctx.isQkm = qkm;
+    ctx.ec_aux_qkm = ec_aux_qkm;
     ctx.lat = std::move(lat);
     ctx.lon = std::move(lon);
     ctx.scln = rows;

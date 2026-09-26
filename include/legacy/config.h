@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #ifndef PG_EV_IMAGE_CONFIG_H
 #define PG_EV_IMAGE_CONFIG_H
 
@@ -136,10 +138,10 @@ inline std::map<std::string, SatConfig> kSatConfigs = {
                     5, {"EV_1KM_Emissive", 3, "", 3, 1164.837}
                 },
                 {
-                    6, {"EV_250_Aggr.1KM_Emissive", 0, "EV_250_Emissive_b24", 4, 926.606}
+                    6, {"EV_250_Aggr.1KM_Emissive", 0, "EV_250_Emissive_b6", 4, 926.606}
                 },
                 {
-                    7, {"EV_250_Aggr.1KM_Emissive", 1, "EV_250_Emissive_b25", 5, 837.013}
+                    7, {"EV_250_Aggr.1KM_Emissive", 1, "EV_250_Emissive_b7", 5, 837.013}
                 }
             }
         }

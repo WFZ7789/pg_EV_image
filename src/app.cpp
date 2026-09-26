@@ -1,3 +1,5 @@
+/// SPDX-License-Identifier: MIT
+
 #include "pipeline.hpp"
 #include "config.h"
 #include "read.h"
@@ -85,7 +87,7 @@ int main(int argc, char** argv) {
     auto* render = app.add_subcommand("render", "渲染单景产品");
     auto* mosaic = app.add_subcommand("mosaic", "拼接 FY-3 MERSI 连续轨段");
     std::string inspect_path, data, geo, aux, mode, color, output, projection = "geographic", job;
-    int band = 0, width = 3840;
+    int band = 0, width = 0;
     double center_lat = 0, center_lon = 0, half_range = 0, grid_step = 0;
     bool grid = false;
     inspect->add_option("data", inspect_path)->required();

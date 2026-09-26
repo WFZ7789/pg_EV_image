@@ -4,6 +4,7 @@
 !/CMakeLists.txt
 !/CMakePresets.json
 !/README.md
+!/LICENSE
 !/main.cpp
 !/color.h
 !/config.h

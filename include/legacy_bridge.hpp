@@ -1,5 +1,6 @@
-#pragma once
+/// SPDX-License-Identifier: MIT
 
+#pragma once
 #include "pipeline.hpp"
 #include "rend.h"
 
