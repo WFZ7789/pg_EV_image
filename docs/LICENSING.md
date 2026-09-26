@@ -2,8 +2,8 @@
 
 核对日期：2026-09-27。项目自有代码采用 MIT，全文见根目录 `LICENSE`。
 C++ 文件使用 `SPDX-License-Identifier: MIT` 通知；构建配置和 Python/Shell 脚本的
-许可范围由 README 与此文件声明。版权声明使用项目贡献者的集合称谓
-`pg_EV_image contributors`，不把 Git 作者字段当作权利人身份。未对第三方组件重新授权。
+许可范围由 README 与此文件声明。许可证署名按项目维护者要求写为 `Codex`；
+该署名及 Git 作者字段不作为版权归属核验依据。未对第三方组件重新授权。
 
 ## 核对结论与范围
 

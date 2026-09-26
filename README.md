@@ -73,6 +73,8 @@ GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`�
 
 ## 许可证
 
+开发贡献：Codex。
+
 本项目自有代码采用 [MIT License](LICENSE)，包括
 `include/`、`src/`、`tests/` 下的代码、构建配置和根目录的 Python/Shell 脚本。
 第三方组件及其素材保留各自许可证，不因本项目采用 MIT 而重新授权。
