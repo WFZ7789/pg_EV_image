@@ -44,10 +44,10 @@ struct Canvas {
     Bounds bounds;
     int width;
     int height;
-    int left_margin = 90;
-    int top_margin = 105;
-    int right_margin = 180;
-    int bottom_margin = 105;
+    int left_margin = 0;
+    int top_margin = 162;
+    int right_margin = 300;
+    int bottom_margin = 162;
     cv::Point2f pixel(Point p) const {
         return {float(left_margin + (p.x - bounds.left) * (width - 1) / (bounds.right - bounds.left)),
                 float(top_margin + (bounds.top - p.y) * (height - 1) / (bounds.top - bounds.bottom))};
@@ -117,17 +117,6 @@ void paint_scene(cv::Mat3b& image, cv::Mat1i& priority, const Canvas& canvas,
     }
 }
 
-std::string lat_label(double v) {
-    std::ostringstream out; out << std::abs(int(std::round(v))) << (v < 0 ? "S" : "N");
-    return out.str();
-}
-
-std::string lon_label(double v) {
-    double n = std::remainder(v, 360.0);
-    std::ostringstream out; out << std::abs(int(std::round(n))) << (n < 0 ? "W" : "E");
-    return out.str();
-}
-
 std::chrono::sys_time<std::chrono::minutes> parse_time(const std::string& key) {
     if (key.size() != 12) throw std::invalid_argument("无法解析观测时间: " + key);
     int year = std::stoi(key.substr(0,4));
@@ -139,96 +128,6 @@ std::chrono::sys_time<std::chrono::minutes> parse_time(const std::string& key) {
     if (!date.ok() || hour > 23 || minute > 59)
         throw std::invalid_argument("观测时间无效: " + key);
     return std::chrono::sys_days(date)+std::chrono::hours(hour)+std::chrono::minutes(minute);
-}
-
-std::string display_time(const std::string& key) {
-    if (key.size() != 12) return key;
-    return key.substr(0,4)+"-"+key.substr(4,2)+"-"+key.substr(6,2)+" " +
-           key.substr(8,2)+":"+key.substr(10,2);
-}
-
-void draw_grid(cv::Mat3b& image, const Canvas& canvas, const Projection& projection,
-               double requested_step) {
-    double span = projection.orthographic ? 180.0 :
-        std::max(canvas.bounds.right-canvas.bounds.left, canvas.bounds.top-canvas.bounds.bottom);
-    const double choices[]{1,2,5,10,15,20,30,45,60};
-    double step = requested_step;
-    if (step <= 0) {
-        step = 60;
-        for (double candidate : choices)
-            if (candidate >= span / 8) { step = candidate; break; }
-    }
-    cv::Rect region(canvas.left_margin, canvas.top_margin, canvas.width, canvas.height);
-    cv::Mat3b layer = image.clone();
-    auto trace = [&](bool meridian, double fixed) {
-        double begin = meridian ? -90 : projection.center_lon - 180;
-        double end = meridian ? 90 : projection.center_lon + 180;
-        if (!projection.orthographic) {
-            begin = meridian ? canvas.bounds.bottom : canvas.bounds.left;
-            end = meridian ? canvas.bounds.top : canvas.bounds.right;
-        }
-        int count = std::max(100, int((end-begin)*5));
-        cv::Point previous; bool has_previous = false;
-        for (int i = 0; i <= count; ++i) {
-            double varying = begin + (end-begin)*i/count;
-            Point p = meridian ? projection.project(varying, fixed) : projection.project(fixed, varying);
-            if (!p.valid) { has_previous = false; continue; }
-            auto point = canvas.pixel(p);
-            cv::Point current(cvRound(point.x), cvRound(point.y));
-            bool in = region.contains(current);
-            if (has_previous && in && cv::norm(current-previous) < 25)
-                cv::line(layer, previous, current, {220,220,220}, 1, cv::LINE_AA);
-            previous = current; has_previous = in;
-        }
-    };
-    double start_lon = projection.orthographic ? projection.center_lon - 180 : canvas.bounds.left;
-    double end_lon = projection.orthographic ? projection.center_lon + 180 : canvas.bounds.right;
-    for (double lon = std::ceil(start_lon/step)*step; lon <= end_lon; lon += step) trace(true,lon);
-    for (double lat = std::ceil((projection.orthographic ? -90 : canvas.bounds.bottom)/step)*step;
-         lat <= (projection.orthographic ? 90 : canvas.bounds.top); lat += step) trace(false,lat);
-    cv::addWeighted(layer, .55, image, .45, 0, image);
-    if (!projection.orthographic) {
-        for (double lon = std::ceil(canvas.bounds.left/step)*step; lon <= canvas.bounds.right; lon += step) {
-            auto pt = canvas.pixel({lon, canvas.bounds.bottom, true});
-            cv::putText(image, lon_label(lon), {cvRound(pt.x)-18, canvas.top_margin+canvas.height+28},
-                        cv::FONT_HERSHEY_SIMPLEX, .55, {255,255,255}, 1, cv::LINE_AA);
-        }
-        for (double lat = std::ceil(canvas.bounds.bottom/step)*step; lat <= canvas.bounds.top; lat += step) {
-            auto pt = canvas.pixel({canvas.bounds.left, lat, true});
-            cv::putText(image, lat_label(lat), {8, cvRound(pt.y)+4},
-                        cv::FONT_HERSHEY_SIMPLEX, .55, {255,255,255}, 1, cv::LINE_AA);
-        }
-    } else {
-        std::vector<cv::Rect> placed;
-        for (double lon = std::ceil((projection.center_lon-80)/step)*step;
-             lon <= projection.center_lon+80; lon += step) {
-            auto p = projection.project(projection.center_lat,lon);
-            if (!p.valid) continue;
-            auto pt = canvas.pixel(p);
-            std::string label = lon_label(lon);
-            cv::Rect box(cvRound(pt.x)-20,cvRound(pt.y)+8,55,22);
-            bool overlaps = std::any_of(placed.begin(),placed.end(),
-                [&](const cv::Rect& other) { return (box & other).area() > 0; });
-            if (region.contains(cv::Point(cvRound(pt.x),cvRound(pt.y))) && !overlaps) {
-                cv::putText(image,label,box.tl()+cv::Point(0,15),
-                            cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1,cv::LINE_AA);
-                placed.push_back(box);
-            }
-        }
-        for (double lat = -60; lat <= 60; lat += step) {
-            auto p = projection.project(lat, projection.center_lon-80);
-            if (!p.valid) continue;
-            auto pt = canvas.pixel(p);
-            cv::Rect box(cvRound(pt.x),cvRound(pt.y)-18,48,22);
-            bool overlaps = std::any_of(placed.begin(),placed.end(),
-                [&](const cv::Rect& other) { return (box & other).area() > 0; });
-            if (region.contains(cv::Point(cvRound(pt.x),cvRound(pt.y))) && !overlaps) {
-                cv::putText(image, lat_label(lat), box.tl()+cv::Point(0,15),
-                            cv::FONT_HERSHEY_SIMPLEX,.5,{255,255,255},1,cv::LINE_AA);
-                placed.push_back(box);
-            }
-        }
-    }
 }
 
 void validate(const Request& request) {
@@ -279,6 +178,45 @@ void inspect(const std::filesystem::path& data) {
 
 void render(const Request& request) {
     validate(request);
+    auto path = request.output.empty() ? std::filesystem::path("output/result.png") : request.output;
+    if (path.extension().empty()) path += ".png";
+    auto ext = path.extension().string();
+    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".tif" && ext != ".tiff")
+        throw std::invalid_argument("不支持的输出格式: " + ext);
+    if (request.inputs.size() == 1) {
+        Scene scene = read_mersi(request.inputs.front(), request);
+        auto& lat = scene.image.geo.latitude.values;
+        auto& lon = scene.image.geo.longitude.values;
+        const bool qkm = scene.alias.find("250M") != std::string::npos || scene.alias.find("QKM") != std::string::npos;
+        const bool ec_aux_qkm = request.mode == "EC" && !request.inputs.front().aux.empty();
+        if (!qkm && !ec_aux_qkm && *std::ranges::max_element(lon) - *std::ranges::min_element(lon) > 180)
+            for (auto& value : lon)
+                if (value < 0) value += 360;
+        const bool orthographic = request.projection == "orthographic";
+        if (orthographic)
+            for (size_t i = 0; i < lat.size(); ++i) {
+                auto point = legacy_orthographic(lat[i], lon[i], request.center_lat, request.center_lon);
+                lat[i] = point.first;
+                lon[i] = point.second;
+                if (request.mode == "TSG")
+                    scene.image.color.values[i] = std::isnan(lat[i]) ? cv::Vec3b(0, 0, 0) :
+                        scene.image.mapper(lat[i], scene.image.scale);
+            }
+        std::function<cv::Vec3b(double, const RenderConfig&)> mapper;
+        if (scene.image.has_colorbar && scene.image.mapper)
+            mapper = [fn = scene.image.mapper](double value, const RenderConfig& scale) {
+                return fn(value, {scale.lowval, scale.hival});
+            };
+        LegacyGrid grid{request.grid, request.grid_step, orthographic, request.center_lat, request.center_lon};
+        if (!path.has_parent_path()) path = std::filesystem::path(".") / path;
+        rend_cl(scene.image.color.values, scene.image.geo.latitude.values, scene.image.geo.longitude.values,
+                path.string(), scene.labels, scene.extra_label, scene.image.color.rows, scene.image.color.cols,
+                mapper, {scene.image.scale.lowval, scene.image.scale.hival}, request.half_range.has_value(),
+                orthographic ? 0 : request.center_lat, orthographic ? 0 : request.center_lon,
+                request.half_range.value_or(7.5), grid, request.width);
+        std::cout << "已保存 " << path << '\n';
+        return;
+    }
     struct Entry { Input input; std::string satellite, sensor, time, resolution; };
     std::vector<Entry> entries;
     Bounds bounds;
@@ -351,10 +289,9 @@ void render(const Request& request) {
     if (bounds.right-bounds.left <= 0 || bounds.top-bounds.bottom <= 0 ||
         bounds.right-bounds.left > 180)
         throw std::invalid_argument("地图范围无效或跨越超过 180 度，请指定区域中心与半宽");
-    const int map_width = request.width != 0 ? request.width :
-        std::max(3840, static_cast<int>(std::lround(native_rows * 1.6)));
+    const int map_width = std::max(3840, static_cast<int>(native_rows * 1.6));
     int height = projection.orthographic ? map_width :
-        std::max(256, int(std::round(map_width * (bounds.top-bounds.bottom)/(bounds.right-bounds.left))));
+        std::max(1, int(map_width * (bounds.top-bounds.bottom)/(bounds.right-bounds.left)));
     if (height > 16000) throw std::invalid_argument("地图高度超过 16000 像素，请缩小区域或宽度");
     if (uint64_t(map_width) * height > 256000000)
         throw std::invalid_argument("地图超过 2.56 亿像素，请缩小区域或宽度");
@@ -383,6 +320,8 @@ void render(const Request& request) {
     }
     std::function<cv::Vec3b(double,const DisplayScale&)> legend_mapper;
     DisplayScale legend_scale;
+    std::vector<std::string> labels;
+    std::string extra_label;
     for (const Entry& entry : entries) {
         Scene scene = read_mersi(entry.input, tuned_request);
         if (request.mode == "E") {
@@ -398,38 +337,25 @@ void render(const Request& request) {
             legend_mapper = scene.image.mapper;
             legend_scale = scene.image.scale;
         }
+        if (labels.empty()) {
+            labels = scene.labels;
+            extra_label = scene.extra_label;
+        }
         std::cout << "绘制 " << entry.input.data << '\n';
         paint_scene(image,priority,canvas,projection,scene);
     }
-    if (request.grid) draw_grid(image,canvas,projection,request.grid_step);
-    if (legend_mapper) {
-        int x = canvas.left_margin + canvas.width + 35;
-        int y0 = canvas.top_margin, y1 = y0 + canvas.height - 1;
-        for (int y = y0; y <= y1; ++y) {
-            double t = double(y-y0) / std::max(1,y1-y0);
-            double value = legend_scale.hival*(1-t)+legend_scale.lowval*t;
-            cv::line(image,{x,y},{x+30,y},cv::Scalar(legend_mapper(value,legend_scale)));
-        }
-        cv::rectangle(image,{x,y0},{x+30,y1},{255,255,255});
-        cv::putText(image,std::to_string(int(std::round(legend_scale.hival))),{x+38,y0+16},
-                    cv::FONT_HERSHEY_SIMPLEX,.6,{255,255,255},1,cv::LINE_AA);
-        cv::putText(image,std::to_string(int(std::round(legend_scale.lowval))),{x+38,y1},
-                    cv::FONT_HERSHEY_SIMPLEX,.6,{255,255,255},1,cv::LINE_AA);
-    }
-    std::string title = entries.front().satellite + " " + entries.front().sensor + " " + request.mode;
-    if (!entries.front().time.empty()) {
-        title += " " + display_time(entries.front().time);
-        if (entries.size() > 1) title += " - " + display_time(entries.back().time);
-    }
-    const double title_scale = std::clamp(canvas.width / 3840.0, 1.0, 3.0);
-    const int title_thickness = std::max(2, cvRound(title_scale * 2));
-    cv::putText(image,title,{canvas.left_margin,70},cv::FONT_HERSHEY_SIMPLEX,title_scale,
-                {255,255,255},title_thickness,cv::LINE_AA);
-    auto path = request.output.empty() ? std::filesystem::path("output/result.png") : request.output;
-    if (path.extension().empty()) path += ".png";
-    auto ext = path.extension().string();
-    if (ext != ".png" && ext != ".jpg" && ext != ".jpeg" && ext != ".tif" && ext != ".tiff")
-        throw std::invalid_argument("不支持的输出格式: " + ext);
+    const double unit = projection.orthographic ? 1 / Deg2rad : 1;
+    LegacyGrid grid{request.grid, request.grid_step, projection.orthographic, projection.center_lat, projection.center_lon};
+    draw_legacy_grid(image, {canvas.left_margin, canvas.top_margin, canvas.width, canvas.height},
+                     bounds.bottom * unit, bounds.top * unit, bounds.left * unit, bounds.right * unit, grid);
+    std::function<cv::Vec3b(double, const RenderConfig&)> mapper;
+    if (legend_mapper)
+        mapper = [fn = legend_mapper](double value, const RenderConfig& scale) {
+            return fn(value, {scale.lowval, scale.hival});
+        };
+    draw_legacy_annotations(image, bounds.bottom * unit, bounds.top * unit, bounds.left * unit, bounds.right * unit,
+                            labels, extra_label, mapper, {legend_scale.lowval, legend_scale.hival});
+    resize_legacy_image(image, map_width, request.width);
     if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path());
     if (!cv::imwrite(path.string(),image)) throw std::runtime_error("图片写入失败: " + path.string());
     std::cout << "已保存 " << path << " (" << image.cols << " x " << image.rows << ")\n";

@@ -121,7 +121,8 @@ Scene read_mersi(const Input& input, const Request& request) {
         };
     }
     frame.validate();
-    return {std::move(frame), sat, sensor, alias, time_key, input.data};
+    return {std::move(frame), sat, sensor, alias, time_key, input.data,
+            std::move(image.labels), std::move(image.extra_label)};
 }
 
 }

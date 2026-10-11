@@ -489,8 +489,8 @@ inline void mode_RTpp_fy4(Context& ctx) {
 
 inline void rayleigh_and_trc_correction_AGRI(vector<float>& blue, vector<float>& red,
                                              vector<float>& nir, const vector<float>& solarZ,
-                                             const vector<float>& satZ) {
-    constexpr static array kRayleigh_coefs{0.1726f, 0.0501f, 0.0187f};
+                                             const vector<float>& satZ, const string& sat) {
+    constexpr array kRayleigh_coefs{0.1726f, 0.0501f, 0.0187f};
     constexpr float kSRF_R[3] = {-0.1992f, 1.3768f, -0.1770f};
     constexpr float kSRF_G[3] = {0.4500f, 0.4500f, 0.1000f};
     constexpr float kSRF_B[3] = {1.0000f, 0.0000f, 0.0000f};
@@ -498,14 +498,15 @@ inline void rayleigh_and_trc_correction_AGRI(vector<float>& blue, vector<float>&
     for (size_t i = 0; i < N; i++)
     {
         const float raw_blue = blue[i], raw_red = red[i], raw_nir = nir[i];
-        if (isnan(raw_blue) || isnan(raw_red) || isnan(raw_nir) ||
-            solarZ[i] > 90)
+        if (!isfinite(raw_blue) || !isfinite(raw_red) || !isfinite(raw_nir) ||
+            !isfinite(solarZ[i]) || !isfinite(satZ[i]) ||
+            solarZ[i] >= 90.0f || satZ[i] >= 90.0f)
         {
             blue[i] = red[i] = nir[i] = NAN;
             continue;
         }
-        float mu_s = cos(solarZ[i] * static_cast<float>(Deg2rad));
-        float mu_v = cos(satZ[i] * static_cast<float>(Deg2rad));
+        float mu_s = max(cos(solarZ[i] * static_cast<float>(Deg2rad)), 0.05f);
+        float mu_v = max(cos(satZ[i] * static_cast<float>(Deg2rad)), 0.05f);
         float max_refl = max({raw_blue, raw_red, raw_nir});
         float weight = 1.0f - clamp(max_refl / 0.6f, 0.0f, 1.0f);
         float rpath[3];
@@ -521,9 +522,20 @@ inline void rayleigh_and_trc_correction_AGRI(vector<float>& blue, vector<float>&
         const float output_red = kSRF_R[0] * clean_blue + kSRF_R[1] * clean_red + kSRF_R[2] * clean_nir;
         const float output_green = kSRF_G[0] * clean_blue + kSRF_G[1] * clean_red + kSRF_G[2] * clean_nir;
         const float output_blue = kSRF_B[0] * clean_blue + kSRF_B[1] * clean_red + kSRF_B[2] * clean_nir;
-        red[i] = pow(max(output_red, 0.0f), 0.85f) * 0.90873f;
+        red[i] = pow(max(output_red, 0.0f), sat == "FY-4B" ? 0.87f : 0.85f) *
+                 (sat == "FY-4B" ? 0.90f : 0.90873f);
         nir[i] = pow(max(output_green, 0.0f), 0.85f);
         blue[i] = pow(max(output_blue, 0.0f), 0.75f) * 1.06f;
+        if (sat == "FY-4B")
+        {
+            const float peak = max({red[i], nir[i], blue[i]});
+            const float highlight_scale = peak > 0.82f
+                    ? (0.82f + 0.16f * (1.0f - exp(-(peak - 0.82f) / 0.16f))) / peak
+                    : 1.0f;
+            red[i] *= highlight_scale;
+            nir[i] *= highlight_scale;
+            blue[i] *= highlight_scale;
+        }
     }
 }
 
@@ -747,7 +759,7 @@ inline void mode_RTEC_fy4(Context& ctx) {
 
     apply_rtec_solar_correction(red.first, green.first, blue.first, solarZ.first, Des);
     rayleigh_and_trc_correction_AGRI(blue.first, red.first, green.first,
-                                      solarZ.first, satZ.first);
+                                      solarZ.first, satZ.first, ctx.sat);
     cv::Mat shade = apply_directional_shadow_fast(lir1.first, solarZ.first, solarA.first,
                                                   lir1.second[0], lir1.second[1]);
     vector<cv::Vec3b> comp(N);
@@ -817,7 +829,7 @@ inline void mode_RTEC16_fy4(Context& ctx) {
 
     apply_rtec_solar_correction(red.first, green.first, blue.first, solarZ.first, Des);
     rayleigh_and_trc_correction_AGRI(blue.first, red.first, green.first,
-                                      solarZ.first, satZ.first);
+                                      solarZ.first, satZ.first, ctx.sat);
     cv::Mat shade = apply_directional_shadow_fast(lir1.first, solarZ.first, solarA.first,
                                                   lir1.second[0], lir1.second[1]);
     vector<cv::Vec<uint16_t, 3>> comp(N);

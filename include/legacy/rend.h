@@ -58,13 +58,72 @@ constexpr const char* Output_suffix{".jpeg"};
 constexpr const char* Output_suffix{".png"};
 #endif
 
+/// @brief 原样复用旧版坐标、标题、页脚和色条绘制。
+inline void draw_legacy_annotations(cv::Mat& canvas, double min_la, double max_la,
+                                    double min_lo, double max_lo, const vector<string>& lbls,
+                                    const string& ESlbl,
+                                    const std::function<cv::Vec3b(double, const RenderConfig&)>& qcolor_fn,
+                                    const RenderConfig& cfg) {
+    const int H = canvas.rows, W = canvas.cols;
+    const int offH = 324, offW = 300;
+    const int font = cv::FONT_HERSHEY_SIMPLEX;
+    const double font_scale = 1.5;
+    const int thick = 2;
+    const cv::Scalar front(255, 255, 255);
+
+    cv::putText(canvas, to_string(min_lo), {0, H - 80}, font, font_scale * 0.8, front, thick,
+                cv::LINE_AA);
+    cv::putText(canvas, to_string(max_lo), {W - offW, H - 80}, font, font_scale * 0.8, front, thick,
+                cv::LINE_AA);
+    cv::putText(canvas, to_string(min_la), {W - offW, H - offH / 2}, font, font_scale * 0.8, front, thick,
+                cv::LINE_AA);
+    cv::putText(canvas, to_string(max_la), {W - offW, offH / 2}, font, font_scale * 0.8, front, thick,
+                cv::LINE_AA);
+    cv::putText(canvas, lbls[3] + " " + lbls[1] + " " +
+                        lbls[2], {30, 64}, font, font_scale * 1.5, front, thick,
+                cv::LINE_AA);
+    cv::putText(canvas, lbls[4], {20, H - 40}, font, font_scale, front, thick, cv::LINE_AA);
+    auto sz_es = cv::getTextSize(ESlbl, font, font_scale, thick, nullptr);
+    cv::putText(canvas, ESlbl, {W - sz_es.width - 20, H - 40}, font, font_scale * 1.2,
+                front, thick, cv::LINE_AA);
+
+    if (qcolor_fn)
+    {
+        const int b_w = 50, b_h = H;
+        const int b_x = W - 50, b_y = (H - b_h) / 2;
+        for (int i = 0; i < b_h; ++i)
+        {
+            float val = cfg.hival - (cfg.hival - cfg.lowval) * (static_cast<float>(i) / b_h);
+            cv::line(canvas, {b_x, b_y + i}, {b_x + b_w, b_y + i}, cv::Scalar(qcolor_fn(val, cfg)));
+        }
+        cv::rectangle(canvas, {b_x, b_y}, {b_x + b_w, b_y + b_h}, front, 1);
+        stringstream ss;
+        ss << scientific << setprecision(2);
+        ss.str("");
+        ss << cfg.hival;
+        cv::putText(canvas, ss.str(), {b_x - offW + 40, b_y + 50}, font, 1.5, front, 3);
+        ss.str("");
+        ss << cfg.lowval;
+        cv::putText(canvas, ss.str(), {b_x - offW + 40, b_y + b_h - 40}, font, 1.5, front, 3);
+    }
+}
+
+inline void resize_legacy_image(cv::Mat& canvas, int map_width, int output_width) {
+    if (output_width <= 0 || output_width == map_width) return;
+    const double scale = double(output_width) / map_width;
+    cv::resize(canvas, canvas, {std::max(1, cvRound(canvas.cols * scale)),
+                               std::max(1, cvRound(canvas.rows * scale))},
+               0, 0, scale < 1 ? cv::INTER_AREA : cv::INTER_LINEAR);
+}
+
 /// @brief 渲染预计算颜色数据到 PNG，可选绘制色标
 /// @param qcolor_fn 色标颜色映射函数，为空时不绘制色标
 inline void rend_cl(const vector<cv::Vec3b>& comp, const vector<float>& lat, const vector<float>& lon,
                     string outname, const vector<string>& lbls, const string& ESlbl, int rows, int cols,
                     const std::function<cv::Vec3b(double, const RenderConfig&)>& qcolor_fn = nullptr,
                     const RenderConfig& cfg = {},
-                    bool crop_area = false, double tlat = 0, double tlon = 0, double half = 7.5) {
+                    bool crop_area = false, double tlat = 0, double tlon = 0, double half = 7.5,
+                    const LegacyGrid& grid = {}, int output_width = 0) {
     if (active_scene_capture) {
         if (active_scene_capture->rows != 0)
             throw runtime_error("产品生成了多幅图像，不能作为单景拼接输入");
@@ -165,46 +224,10 @@ inline void rend_cl(const vector<cv::Vec3b>& comp, const vector<float>& lat, con
         top_vertices.swap(bottom_vertices);
     }
 
-    const int font = cv::FONT_HERSHEY_SIMPLEX;
-    const double font_scale = 1.5;
-    const int thick = 2;
-    const cv::Scalar front(255, 255, 255);
-
-    cv::putText(canvas, to_string(min_lo), {0, H - 80}, font, font_scale * 0.8, front, thick,
-                cv::LINE_AA);
-    cv::putText(canvas, to_string(max_lo), {W - offW, H - 80}, font, font_scale * 0.8, front, thick,
-                cv::LINE_AA);
-    cv::putText(canvas, to_string(min_la), {W - offW, H - offH / 2}, font, font_scale * 0.8, front, thick,
-                cv::LINE_AA);
-    cv::putText(canvas, to_string(max_la), {W - offW, offH / 2}, font, font_scale * 0.8, front, thick,
-                cv::LINE_AA);
-    cv::putText(canvas, lbls[3] + " " + lbls[1] + " " +
-                        lbls[2], {30, 64}, font, font_scale * 1.5, front, thick,
-                cv::LINE_AA);
-    cv::putText(canvas, lbls[4], {20, H - 40}, font, font_scale, front, thick, cv::LINE_AA);
-    auto sz_es = cv::getTextSize(ESlbl, font, font_scale, thick, nullptr);
-    cv::putText(canvas, ESlbl, {W - sz_es.width - 20, H - 40}, font, font_scale * 1.2,
-                front, thick, cv::LINE_AA);
-
-    if (qcolor_fn)
-    {
-        const int b_w = 50, b_h = H;
-        const int b_x = W - 50, b_y = (H - b_h) / 2;
-        for (int i = 0; i < b_h; ++i)
-        {
-            float val = cfg.hival - (cfg.hival - cfg.lowval) * (static_cast<float>(i) / b_h);
-            cv::line(canvas, {b_x, b_y + i}, {b_x + b_w, b_y + i}, cv::Scalar(qcolor_fn(val, cfg)));
-        }
-        cv::rectangle(canvas, {b_x, b_y}, {b_x + b_w, b_y + b_h}, front, 1);
-        stringstream ss;
-        ss << scientific << setprecision(2);
-        ss.str("");
-        ss << cfg.hival;
-        cv::putText(canvas, ss.str(), {b_x - offW + 40, b_y + 50}, font, 1.5, front, 3);
-        ss.str("");
-        ss << cfg.lowval;
-        cv::putText(canvas, ss.str(), {b_x - offW + 40, b_y + b_h - 40}, font, 1.5, front, 3);
-    }
+    draw_legacy_grid(canvas, {0, offH / 2, W - offW, H - offH},
+                     min_la, max_la, min_lo, max_lo, grid);
+    draw_legacy_annotations(canvas, min_la, max_la, min_lo, max_lo, lbls, ESlbl, qcolor_fn, cfg);
+    resize_legacy_image(canvas, W - offW, output_width);
 
 #ifdef  TIFF_OUTPUT
     legacy_write_image(full_path, canvas, {cv::IMWRITE_TIFF_COMPRESSION, 8});

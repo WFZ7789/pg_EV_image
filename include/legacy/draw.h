@@ -8,12 +8,102 @@
 
 #include    <stdexcept>
 
+struct LegacyGrid {
+    bool enabled = false;
+    double step = 0;
+    bool orthographic = false;
+    double center_lat = 0;
+    double center_lon = 0;
+};
+
+/// @brief 保留旧版正交投影的运算顺序和以度表示的画布坐标。
+inline std::pair<float, float> legacy_orthographic(double latitude, double longitude,
+                                                 double center_lat, double center_lon) {
+    center_lat *= Deg2rad;
+    center_lon *= Deg2rad;
+    double x = latitude * Deg2rad;
+    double y = longitude * Deg2rad;
+    double dist = acos(sin(center_lat) * sin(x) +
+                       cos(center_lat) * cos(x) * cos(y - center_lon));
+    double angle = atan2(sin(y - center_lon) * cos(x),
+                        cos(center_lat) * sin(x) - sin(center_lat) * cos(x) * cos(y - center_lon));
+    double R = sin(dist);
+    double screen_x = R * sin(angle);
+    double screen_y = R * cos(angle);
+    return {static_cast<float>(screen_y / Deg2rad), static_cast<float>(screen_x / Deg2rad)};
+}
+
 /// @brief 将经纬度转换为画布坐标
 inline cv::Point to_canvas(double la, double lo, double min_la, double min_lo,
                            double x_factor, double y_factor, int H, int offH) {
     int x = static_cast<int>((lo - min_lo) * x_factor);
     int y = H - 1 - static_cast<int>((la - min_la) * y_factor) - offH / 2;
     return {x, y};
+}
+
+/// @brief 仅在旧版主体地图内叠加经纬网，不改动画布布局。
+inline void draw_legacy_grid(cv::Mat& canvas, const cv::Rect& region,
+                             double min_la, double max_la, double min_lo, double max_lo,
+                             const LegacyGrid& grid) {
+    if (!grid.enabled) return;
+    double step = grid.step;
+    if (step <= 0) {
+        step = 60;
+        for (double candidate : {1., 2., 5., 10., 15., 20., 30., 45., 60.})
+            if (candidate >= std::max(max_la - min_la, max_lo - min_lo) / 8) {
+                step = candidate;
+                break;
+            }
+    }
+    const double xf = (region.width - 1) / (max_lo - min_lo);
+    const double yf = (region.height - 1) / (max_la - min_la);
+    cv::Mat layer = canvas(region).clone();
+    auto trace = [&](bool meridian, double fixed) {
+        double begin = meridian ? min_la : min_lo, end = meridian ? max_la : max_lo;
+        if (grid.orthographic) {
+            begin = meridian ? -90 : grid.center_lon - 180;
+            end = meridian ? 90 : grid.center_lon + 180;
+        }
+        int count = std::max(100, int(std::ceil((end - begin) * std::max(xf, yf) / 4)));
+        cv::Point previous;
+        bool connected = false, labelled = false;
+        for (int i = 0; i <= count; ++i) {
+            double varying = begin + (end - begin) * i / count;
+            double la = meridian ? varying : fixed, lo = meridian ? fixed : varying;
+            if (grid.orthographic) {
+                double visibility = sin(grid.center_lat * Deg2rad) * sin(la * Deg2rad) +
+                    cos(grid.center_lat * Deg2rad) * cos(la * Deg2rad) * cos((lo - grid.center_lon) * Deg2rad);
+                if (visibility < 0) { connected = false; continue; }
+                auto point = legacy_orthographic(la, lo, grid.center_lat, grid.center_lon);
+                la = point.first; lo = point.second;
+            }
+            if (!std::isfinite(la) || !std::isfinite(lo)) { connected = false; continue; }
+            auto point = to_canvas(la, lo, min_la, min_lo, xf, yf, region.height, 0);
+            bool in = cv::Rect(0, 0, region.width, region.height).contains(point);
+            if (in && connected && cv::norm(point - previous) < 25)
+                cv::line(layer, previous, point, {220, 220, 220}, 1, cv::LINE_AA);
+            if (in && !labelled) {
+                double value = meridian ? std::remainder(fixed, 360.) : fixed;
+                std::ostringstream label;
+                label << std::abs(value) << (meridian ? (value < 0 ? "W" : "E") : (value < 0 ? "S" : "N"));
+                int baseline = 0;
+                auto size = cv::getTextSize(label.str(), cv::FONT_HERSHEY_SIMPLEX, .9, 1, &baseline);
+                cv::Point position(std::clamp(point.x + 8, 2, std::max(2, region.width - size.width - 2)),
+                                   std::clamp(point.y + size.height + 8, size.height + 2,
+                                              std::max(size.height + 2, region.height - baseline - 2)));
+                cv::putText(layer, label.str(), position, cv::FONT_HERSHEY_SIMPLEX, .9,
+                            {255, 255, 255}, 1, cv::LINE_AA);
+                labelled = true;
+            }
+            previous = point; connected = in;
+        }
+    };
+    double left = grid.orthographic ? grid.center_lon - 180 : min_lo;
+    double right = grid.orthographic ? grid.center_lon + 180 : max_lo;
+    double bottom = grid.orthographic ? -90 : min_la, top = grid.orthographic ? 90 : max_la;
+    for (double lo = std::ceil(left / step) * step; lo <= right; lo += step) trace(true, lo);
+    for (double la = std::ceil(bottom / step) * step; la <= top; la += step) trace(false, la);
+    cv::addWeighted(layer, .55, canvas(region), .45, 0, canvas(region));
 }
 
 /// @brief 计算目标正方形区域（lat/lon ± half）在行列网格中的包围盒，

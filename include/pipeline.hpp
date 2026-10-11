@@ -52,6 +52,8 @@ struct Scene {
     std::string alias;
     std::string time_key;
     std::filesystem::path source;
+    std::vector<std::string> labels;
+    std::string extra_label;
 };
 
 void inspect(const std::filesystem::path& data);
