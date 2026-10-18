@@ -1,14 +1,28 @@
 /// SPDX-License-Identifier: MIT
 
-#include "modes_fy4.h"
+#include "products/fy4.hpp"
+
+#include <algorithm>
+#include <cmath>
 
 int main() {
-    vector<float> blue{0.8f, 0.12f, 0.12f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
-    vector<float> red{0.8f, 0.04f, 0.08f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
-    vector<float> nir{0.8f, 0.015f, 0.4f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
+    using namespace std;
+    fy::core::ExecutionContext context({.threads = 4});
+    vector<float> blue_input{0.8f, 0.12f, 0.12f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
+    vector<float> red_input{0.8f, 0.04f, 0.08f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
+    vector<float> nir_input{0.8f, 0.015f, 0.4f, 0.5f, 0.5f, 0.5f, 1.0f, 1.5f, 0.2f};
     vector<float> solar{0, 0, 0, 89.9f, 90, NAN, 0, 0, 0};
-    vector<float> view(blue.size(), 0);
-    rayleigh_and_trc_correction_AGRI(blue, red, nir, solar, view, "FY-4B");
+    vector<float> view(blue_input.size(), 0);
+    const auto plane = [](const vector<float>& values) {
+        const fy::core::Shape shape{1,values.size()};
+        fy::core::ScalarPlane result{"1",fy::core::Raster<float>(shape,vector<float>(values)),fy::core::Raster<uint8_t>(shape)};
+        for (size_t i = 0; i < values.size(); ++i) result.valid.values()[i] = isfinite(values[i]);
+        return result;
+    };
+    auto red_plane = plane(red_input),nir_plane = plane(nir_input),blue_plane = plane(blue_input);
+    auto solar_plane = plane(solar),view_plane = plane(view);
+    fy::products::correct_agri_day(red_plane,nir_plane,blue_plane,solar_plane,view_plane,"FY-4B",1,context);
+    const auto blue = blue_plane.values.values(),red = red_plane.values.values(),nir = nir_plane.values.values();
     int check = 0;
     const auto require = [&](bool valid) {
         ++check;

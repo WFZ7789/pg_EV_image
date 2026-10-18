@@ -1,7 +1,7 @@
 /// SPDX-License-Identifier: MIT
 
 #pragma once
-#include "raster.hpp"
+#include "core/execution.hpp"
 
 #include <filesystem>
 #include <optional>
@@ -29,34 +29,9 @@ struct Request {
     double center_lon = 0;
     std::optional<double> half_range;
     int width = 0;
-    std::optional<float> forced_scale;
-};
-
-struct ProjectedPoint {
-    double x = 0;
-    double y = 0;
-    bool valid = false;
-};
-
-struct GeoProjection {
-    bool orthographic = false;
-    double center_lat = 0;
-    double center_lon = 0;
-    ProjectedPoint project(double lat, double lon) const;
-};
-
-struct Scene {
-    ProductFrame image;
-    std::string satellite;
-    std::string sensor;
-    std::string alias;
-    std::string time_key;
-    std::filesystem::path source;
-    std::vector<std::string> labels;
-    std::string extra_label;
+    core::ExecutionOptions execution;
 };
 
 void inspect(const std::filesystem::path& data);
-void render(const Request& request);
 
 }

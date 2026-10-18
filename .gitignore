@@ -49,6 +49,7 @@
 **/*.grb
 **/*.dat
 **/*.bin
+!/tests/reference_v1/[a-z]*.bin
 **/*.tif
 **/*.tiff
 **/*.png

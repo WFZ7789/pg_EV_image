@@ -1,17 +1,14 @@
 /// SPDX-License-Identifier: MIT
 
 #include "pipeline.hpp"
-#include "config.h"
-#include "read.h"
+#include "native_swath.hpp"
+#include "sensors/hdf.hpp"
 
 #include <CLI/CLI.hpp>
-#include <H5Cpp.h>
 #include <opencv2/core.hpp>
 
 #include <iostream>
 #include <stdexcept>
-
-int legacy_main(int argc, char** argv);
 
 namespace {
 
@@ -59,24 +56,61 @@ fy::Request load_job(const std::filesystem::path& filename) {
     return request;
 }
 
-int run_legacy(const fy::Request& request) {
-    const auto& input = request.inputs.front();
-    std::vector<std::string> args{"pg_EV_image", "-m", request.mode, "-d", input.data.string()};
-    if (!input.geo.empty()) { args.push_back("-g"); args.push_back(input.geo.string()); }
-    if (!input.aux.empty()) { args.push_back("-a"); args.push_back(input.aux.string()); }
-    args.push_back("-o");
-    args.push_back(request.output.empty() ? "output/result.png" : request.output.string());
-    args.push_back("-b"); args.push_back(std::to_string(request.band));
-    if (!request.color.empty()) { args.push_back("-c"); args.push_back(request.color); }
-    if (request.half_range) {
-        args.push_back("--crop"); args.push_back("-r"); args.push_back(std::to_string(*request.half_range));
-        args.push_back("-x"); args.push_back(std::to_string(request.center_lat));
-        args.push_back("-y"); args.push_back(std::to_string(request.center_lon));
+int execute(const fy::Request& request) {
+    fy::core::ExecutionContext context(request.execution, "native");
+    struct CvThreads {
+        int previous = cv::getNumThreads();
+        bool changed;
+        explicit CvThreads(int threads) : changed(threads > 0) {
+            if (changed) cv::setNumThreads(threads);
+        }
+        ~CvThreads() { if (changed) cv::setNumThreads(previous); }
+    } cv_threads(request.execution.threads);
+    auto write_profile = [&](bool success) {
+        context.profile().set_scratch_bytes(context.scratch().bytes());
+        context.profile().finish(success);
+        if (request.execution.profile) {
+            auto output = request.output.empty() ? std::filesystem::path("output/result.png") : request.output;
+            output += ".profile.json";
+            context.profile().write_json(output);
+            std::cout << "性能报告 " << output << '\n';
+        }
+    };
+    try {
+        if (request.inputs.size() > 1) {
+            context.profile().set_scope("native_mosaic");
+            auto phase = context.profile().phase("native_render");
+            fy::render_native_mosaic(request,context);
+        }
+        else {
+            const auto& input = request.inputs.at(0);
+            const auto adapter = context.io().run([&] {
+                return fy::sensors::identify_hdf_adapter({input.data,input.geo,input.aux});
+            });
+            if (adapter == "fy4") {
+                context.profile().set_scope("native_disk");
+                auto phase = context.profile().phase("native_render");
+                fy::render_native_fy4(request,context);
+            }
+            else if (adapter == "giirs") {
+                context.profile().set_scope("native_spectrum");
+                auto phase = context.profile().phase("native_render");
+                fy::render_native_giirs(request,context);
+            }
+            else {
+                context.profile().set_scope(adapter == "mersi" || adapter == "mwri" || adapter == "pmr" ? "native_swath" : "native_scene");
+                auto phase = context.profile().phase("native_render");
+                fy::render_native_scene(request,adapter,context);
+            }
+        }
+    } catch (...) {
+        const auto original_error = std::current_exception();
+        try { write_profile(false); }
+        catch (const std::exception& error) { std::cerr << "性能报告失败: " << error.what() << '\n'; }
+        std::rethrow_exception(original_error);
     }
-    if (request.projection == "orthographic") args.push_back("--aq");
-    std::vector<char*> raw;
-    for (auto& arg : args) raw.push_back(arg.data());
-    return legacy_main(int(raw.size()), raw.data());
+    write_profile(true);
+    return 0;
 }
 
 }
@@ -90,6 +124,7 @@ int main(int argc, char** argv) {
     int band = 0, width = 0;
     double center_lat = 0, center_lon = 0, half_range = 0, grid_step = 0;
     bool grid = false;
+    fy::core::ExecutionOptions execution;
     inspect->add_option("data", inspect_path)->required();
     render->add_option("-d,--data", data)->required();
     render->add_option("-g,--geo", geo);
@@ -106,10 +141,20 @@ int main(int argc, char** argv) {
     render->add_option("--grid-step", grid_step);
     render->add_flag("--grid", grid);
     mosaic->add_option("--job", job)->required();
+    for (auto* command : {render, mosaic}) {
+        command->add_option("--threads", execution.threads, "计算线程数，0 为自动")
+            ->check(CLI::NonNegativeNumber);
+        command->add_flag("--profile", execution.profile, "保存性能 JSON 报告");
+        command->add_option("--scratch-dir", execution.scratch_directory, "任务临时缓存的父目录");
+    }
     CLI11_PARSE(app, argc, argv);
     try {
         if (inspect->parsed()) { fy::inspect(inspect_path); return 0; }
-        if (mosaic->parsed()) { fy::render(load_job(job)); return 0; }
+        if (mosaic->parsed()) {
+            auto request = load_job(job);
+            request.execution = execution;
+            return execute(request);
+        }
         if (!render->parsed()) { std::cout << app.help(); return 0; }
         fy::Request request;
         request.inputs.push_back({data,geo,aux});
@@ -118,17 +163,8 @@ int main(int argc, char** argv) {
         request.center_lat = center_lat; request.center_lon = center_lon;
         if (render->get_option("--half-range")->count()) request.half_range = half_range;
         request.grid_step = grid_step; request.grid = grid;
-        H5::H5File source(data, H5F_ACC_RDONLY);
-        std::string sat = read_str_attr(source.openGroup("/").openAttribute("Satellite Name"));
-        std::string sensor = read_str_attr(source.openAttribute("Sensor Identification Code"));
-        if (sat.rfind("FY-3",0) == 0 && sensor.find("MERSI") != std::string::npos) {
-            fy::render(request); return 0;
-        }
-        if (sat.rfind("FY-4",0) == 0 && request.projection == "orthographic")
-            throw std::invalid_argument("FY4 原生圆盘暂不支持正交投影");
-        return run_legacy(request);
-    } catch (const H5::Exception& error) {
-        std::cerr << "HDF5 错误: " << error.getDetailMsg() << '\n'; return 2;
+        request.execution = execution;
+        return execute(request);
     } catch (const std::exception& error) {
         std::cerr << "处理失败: " << error.what() << '\n'; return 2;
     }

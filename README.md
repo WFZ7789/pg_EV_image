@@ -12,6 +12,9 @@ cmake --build --preset release -j 4
 ctest --test-dir cmake-build-release --output-on-failure
 ```
 
+仅构建 CPU 核心与测试可使用 `-DFY_BUILD_APP=OFF`，只需 oneTBB 和系统线程库。
+如果已有构建目录使用不同生成器，请通过 `cmake -S . -B 新目录 -G Ninja` 建立独立目录。
+
 ## 使用
 
 查看卫星、载荷和文件别名：
@@ -52,23 +55,48 @@ FY3 MERSI 的 `EC` 可用 1KM 文件作为主数据，并通过 `--aux` 附加�
 ./cmake-build-release/pg_EV_image mosaic --job 任务.json
 ```
 
+`render` 和 `mosaic` 均支持 `--threads 4`（0 为自动）、`--profile` 和
+`--scratch-dir /本地缓存父目录`。报告路径是在输出参数后附加 `.profile.json`；
+任务临时目录结束时自动清理。MERSI/MWRI 单景使用原生窗口读取和目标尺寸栅格器，
+报告范围为 `native_swath`；MERSI 拼接使用任务数值缓存、共同统计和并行栅格器，
+报告范围为 `native_mosaic`。FY4 AGRI/GHI 使用原生产品和最终尺寸成图，报告范围为
+`native_disk`。PMR 根据 `Geo_Fields/SLV` 结构识别，缺少载荷名称属性也可通过原生路径成图，
+报告范围为 `native_swath`。GIIRS 使用原生光谱路径，报告范围为 `native_spectrum`；
+IRall 按光谱族缓存数值、确定共同色阶后逐帧输出。
+新核心的接口和阶段验证见 [重构执行记录](docs/REFACTOR_V2_PROGRESS.md)。
+正式程序与默认测试均已移除 legacy 编译依赖和旧 CLI 回转。
+产品回归使用[冻结参考记录](tests/reference_v1/README.md)，独立旧版本导出器的使用方法见
+[参考工具说明](tools/REFERENCE_WORKFLOWS.md)。
+正式功能、架构及九项负载测量已完成，详见[性能与成本报告](docs/REFACTOR_V2_PERFORMANCE.md)。
+本次八项可与旧版成功成图比较的负载，原生自动线程墙钟均更长；FY4 1KM RTEC 的
+中位数由约 8.31 秒增至 67.20 秒。迁移和采样质量验证通过，当前版本存在明确的性能回退。
+
 任务中 `inputs` 至少两组。单次任务要求同一卫星、载荷和分辨率；产品与波段在任务级统一设置。程序按观测时间排序，重叠处选靠近扫描中心的有效像元。亮温 `E` 以及真彩/假彩 `RT`、`RY`、`RMUL` 模式使用整个任务的共同显示范围。时间间隔超过十分钟会提示，未覆盖区域保持空白。
 
-FY3 成图沿用 `legacy-baseline` 的尺寸、裁剪、投影、标题、页脚、坐标和色条格式。
+FY3 单景保留产品公式、标题、页脚、坐标及色条锚点；直接按主体宽度创建画布，
+使用面积覆盖采样，不以旧图缩放后的逐像素相等作为验收要求。无效 GEO 不参与画幅计算。
 单景主体宽度按裁剪后的行数自动确定（至少 3840 像素，完整 250M 轨道通常为 12800 像素）；
-`--width` 将完整旧版画布等比缩放到指定的主体宽度，文字和色条一起缩放。
+`--width` 直接设置最终主体宽度，文字、边距和色条按版式比例绘制。
 标题从 HDF 读取卫星、仪器和观测时间，保留秒及 UTC。默认不画经纬网；使用 `--grid`
-在旧版主体地图内叠加网格，间距自动确定，也可用 `--grid-step` 指定。
+在主体地图内叠加网格，间距自动确定，也可用 `--grid-step` 指定。
 grid 不改变成图尺寸、裁剪、标题、页脚或色条。拼接任务用 `map.grid: 1` 开启。
 输出按扩展名选择 PNG、JPEG 或 TIFF。
-输出目录不存在时会创建；失败会返回非零状态。FY4 原生圆盘和其他载荷继续使用原生渲染路径，
-正交投影与经纬网当前作用于 MERSI 地图流程。
+输出目录不存在时会创建；失败会返回非零状态。FY4 完整画幅默认保留原始主体尺寸，
+`--width` 可直接指定最终主体宽度；具有完整导航的 FY4B 全圆盘支持经纬度区域裁剪。
+FY4 的 `RTEC16`／`RT16` 使用 16 位 PNG 或 TIFF；JPEG 不支持该位深。
+FY4 经纬网需要圆盘导航，正交投影当前仍用于 MERSI 地图流程。
 
 ## 现有产品
 
 MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`EK`、`TSG`。
 FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
 GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
+
+GIIRS 的 `LW`、`MW` 使用从 0 开始的光谱通道编号，页脚保留中心波数，亮温单位为 K。
+`IRall` 先输出全部 MW 通道，再输出全部 LW 通道，以 `000000` 起连续编号；每个光谱族共用显示范围，
+裁剪不改变统计范围。默认输出 `output/000000.jpg` 等文件。
+指定 `-o output/光谱/序列.png` 时，在该父目录输出 `000000.png` 等文件；
+指定无扩展名路径 `-o output/光谱` 时将其作为目录，输出 PNG。
 
 单图命令从旧版 `-m E -d 数据.HDF -g 定位.HDF -b 24 -o 名称` 改为 `render -m E -d 数据.HDF -g 定位.HDF -b 24 -o output/名称.png`。旧版 `--aq` 改为 `--projection orthographic`，`-x/-y/-r` 改为 `--center-lat/--center-lon/--half-range`。产品含义保持原样。
 

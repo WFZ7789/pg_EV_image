@@ -1,0 +1,28 @@
+/// SPDX-License-Identifier: MIT
+
+#include "pipeline.hpp"
+#include "sensors/hdf.hpp"
+
+#include <iostream>
+
+namespace fy {
+
+void inspect(const std::filesystem::path& data) {
+    const auto summary = core::IoChannel::shared()->run([&] { return sensors::read_hdf_summary(data); });
+    std::cout << "Satellite: " << summary.satellite << '\n'
+              << "Sensor: " << summary.sensor << '\n'
+              << "Alias: " << summary.alias << '\n'
+              << "Data: " << data << '\n';
+    if (summary.sensor.find("MERSI") != std::string::npos)
+        std::cout << "Modes: E R LL RT RY RF RMUL EC EK TSG (实际支持情况依卫星和分辨率而定)\n";
+    else if (summary.sensor.find("MWRI") != std::string::npos)
+        std::cout << "Modes: S W W84 TCX TCN TCN2 TCS TCR (依卫星和通道而定)\n";
+    else if (summary.sensor.find("PMR") != std::string::npos)
+        std::cout << "Modes: PMR\n";
+    else if (summary.sensor == "GIIRS")
+        std::cout << "Modes: R LW MW IRall\n";
+    else if (summary.satellite.rfind("FY-4",0) == 0)
+        std::cout << "Modes: E R Re Rr EC RF RY RX RTpp RTEC RTEC16 RTG AGHI_ALD RT16 RT+EC\n";
+}
+
+}
