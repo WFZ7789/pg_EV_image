@@ -9,8 +9,9 @@ namespace fy::core {
 void stream_calibrated(SensorSession& session, int band, Window region, ExecutionContext& context,
                         const std::function<void(SampleTile&&)>& consume, std::size_t block_rows,
                         InvalidSamplePolicy invalid,std::optional<CalibrationDescriptor> calibration_override) {
-    if (!consume || !block_rows || !region.shape.elements())
+    if (!consume || !region.shape.elements())
         throw std::invalid_argument("Invalid streaming request");
+    if (!block_rows) block_rows = session.preferred_block_rows(band,region);
     const auto bands = session.bands();
     const auto found = std::ranges::find(bands, band, &BandDescriptor::id);
     if (found == bands.end()) throw std::invalid_argument("Unknown streaming band");

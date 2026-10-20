@@ -314,6 +314,7 @@ void render_product(const Request& request,const products::LoadedProduct& loaded
         }
         RasterOptions raster_options;
         raster_options.layout = map.layout; raster_options.bit_depth = options.bit_depth;
+        raster_options.exact_coverage = false;
         auto rendered = rasterize_swaths(std::span(&source,1),raster_options,context);
         save_frame(rendered,map,product,request,path,context);
         return;
@@ -342,7 +343,7 @@ void render_product(const Request& request,const products::LoadedProduct& loaded
             source.planes.push_back(plane.values.view().window(crop.window)); source.valid.push_back(plane.valid.view().window(crop.window));
         }
         RasterOptions options;
-        options.layout = crop.map.layout; options.bit_depth = bits;
+        options.layout = crop.map.layout; options.bit_depth = bits; options.exact_coverage = false;
         auto rendered = rasterize_swaths(std::span(&source,1),options,context);
         save_frame(rendered,crop.map,product,request,path,context);
     } else {

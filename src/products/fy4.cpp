@@ -180,7 +180,19 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
             else { solar_correct(inputs[0],inputs[1],distance,context); output.display = scalar_display("",palette::color_enhanced_vis,{0,2}); }
             inputs.resize(1);
         } else if (rtec) {
-            for (std::size_t i = 3; i <= 6; ++i) to_celsius(inputs[i]);
+            context.parallel_rows(shape.rows,[&](std::size_t begin,std::size_t end) {
+                for (std::size_t channel = 3; channel <= 6; ++channel) {
+                    auto values = inputs[channel].values.values();
+                    auto valid = inputs[channel].valid.values();
+                    for (auto i = begin * shape.cols; i < end * shape.cols; ++i) {
+                        const float value = std::isfinite(values[i]) ? float(values[i] + K2c) : NAN;
+                        valid[i] = valid[i] && std::isfinite(value);
+                        values[i] = value;
+                    }
+                }
+            });
+            for (std::size_t channel = 3; channel <= 6; ++channel) inputs[channel].unit = "degC";
+            context.profile().record_computed(shape.elements() * 4);
             auto memory = context.profile().reserve(BufferKind::statistics,shape.elements() * 5);
             auto shade = shadow(inputs[5],inputs[7],inputs[8],context);
             correct_agri_day(inputs[0],inputs[1],inputs[2],inputs[7],inputs[9],metadata.satellite,distance,context);

@@ -56,6 +56,18 @@ fy::Request load_job(const std::filesystem::path& filename) {
     return request;
 }
 
+std::optional<std::string> adapter_for_mode(const std::string& mode) {
+    if (mode == "LW" || mode == "MW" || mode == "IRall") return "giirs";
+    if (mode == "S" || mode == "W" || mode == "W84" || mode == "TCX" || mode == "TCN" ||
+        mode == "TCN2" || mode == "TCS" || mode == "TCR") return "mwri";
+    if (mode == "PMR") return "pmr";
+    if (mode == "Rr" || mode == "RTG" || mode == "RTpp" || mode == "RTEC" || mode == "RTEC16" ||
+        mode == "RT16" || mode == "RT+EC" || mode == "AGHI_ALD" || mode == "RX") return "fy4";
+    if (mode == "LL" || mode == "RT" || mode == "RMUL" || mode == "ECT" || mode == "EK" || mode == "TSG")
+        return "mersi";
+    return std::nullopt;
+}
+
 int execute(const fy::Request& request) {
     fy::core::ExecutionContext context(request.execution, "native");
     struct CvThreads {
@@ -84,7 +96,8 @@ int execute(const fy::Request& request) {
         }
         else {
             const auto& input = request.inputs.at(0);
-            const auto adapter = context.io().run([&] {
+            const auto hinted = adapter_for_mode(request.mode);
+            const auto adapter = hinted ? *hinted : context.io().run([&] {
                 return fy::sensors::identify_hdf_adapter({input.data,input.geo,input.aux});
             });
             if (adapter == "fy4") {

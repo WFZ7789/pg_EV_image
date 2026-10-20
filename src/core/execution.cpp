@@ -15,27 +15,34 @@
 namespace fy::core {
 
 ScratchDirectory::ScratchDirectory(const std::filesystem::path& parent) {
-    auto base = parent.empty() ? std::filesystem::temp_directory_path() : parent;
-    base = std::filesystem::absolute(base);
-    std::filesystem::create_directories(base);
+    base_ = std::filesystem::absolute(parent.empty() ? std::filesystem::temp_directory_path() : parent);
+    if (std::filesystem::exists(base_) && !std::filesystem::is_directory(base_))
+        throw std::invalid_argument("Scratch parent is not a directory");
+}
+
+const std::filesystem::path& ScratchDirectory::path() const {
+    if (!path_.empty()) return path_;
+    std::filesystem::create_directories(base_);
     std::random_device random;
     static std::atomic<std::uint64_t> sequence{0};
     for (int attempt = 0; attempt < 32; ++attempt) {
-        auto candidate = base / ("pg-ev-" + std::to_string(random()) + "-" + std::to_string(sequence++));
+        auto candidate = base_ / ("pg-ev-" + std::to_string(random()) + "-" + std::to_string(sequence++));
         if (std::filesystem::create_directory(candidate)) {
             path_ = std::move(candidate);
-            return;
+            return path_;
         }
     }
     throw std::runtime_error("Cannot create task scratch directory");
 }
 
 ScratchDirectory::~ScratchDirectory() {
+    if (path_.empty()) return;
     std::error_code ignored;
     std::filesystem::remove_all(path_, ignored);
 }
 
 std::uint64_t ScratchDirectory::bytes() const {
+    if (path_.empty()) return 0;
     std::uint64_t result = 0;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(path_))
         if (entry.is_regular_file() && !entry.is_symlink()) result += entry.file_size();
@@ -44,7 +51,7 @@ std::uint64_t ScratchDirectory::bytes() const {
 
 struct ExecutionContext::Impl {
     int threads;
-    oneapi::tbb::global_control control;
+    std::optional<oneapi::tbb::global_control> control;
     oneapi::tbb::task_arena arena;
     ProfileReport report;
     ScratchDirectory scratch;
@@ -57,7 +64,8 @@ struct ExecutionContext::Impl {
 
     Impl(const ExecutionOptions& options, std::string scope)
         : threads(resolve(options.threads)),
-          control(oneapi::tbb::global_control::max_allowed_parallelism, threads), arena(threads),
+          control(options.threads ? std::make_optional<oneapi::tbb::global_control>(
+              oneapi::tbb::global_control::max_allowed_parallelism,threads) : std::nullopt),arena(threads),
           report(std::move(scope), options.threads, threads), scratch(options.scratch_directory),
           channel(IoChannel::shared()) {}
 };

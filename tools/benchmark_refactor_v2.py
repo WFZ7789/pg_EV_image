@@ -107,15 +107,31 @@ def summarize(records):
     return result
 
 
+def remap_path(value, inputs, data_root):
+    path = Path(value)
+    return str(data_root / path.name) if data_root and str(path) in inputs else value
+
+
+def remap_job(job, inputs, data_root):
+    result = dict(job)
+    result["inputs"] = [{key: remap_path(value, inputs, data_root) for key, value in item.items()}
+                        for item in job["inputs"]]
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--app", type=Path, required=True)
+    parser.add_argument("--before-app", type=Path)
+    parser.add_argument("--data-root", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cases", nargs="+", choices=CASES, default=list(CASES))
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
     root, baseline, app, output = Path(__file__).resolve().parents[1], args.baseline.resolve(), args.app.resolve(), args.output.resolve()
+    before_app = args.before_app.resolve() if args.before_app else None
+    data_root = args.data_root.resolve() if args.data_root else None
     frozen = json.loads((baseline / "manifest.json").read_text())
     old_app = baseline / "build/pg_EV_image"
     if digest(old_app) != frozen["executable_sha256"]:
@@ -126,14 +142,16 @@ def main():
         (output / "executables").mkdir()
         shutil.copy2(app, output / "executables/native")
         shutil.copy2(old_app, output / "executables/frozen")
+        if before_app: shutil.copy2(before_app,output / "executables/before")
         validation = []
         for item in frozen["inputs"]:
-            path = Path(item["path"])
+            original = Path(item["path"])
+            path = data_root / original.name if data_root else original
             print("Hashing", path.name, flush=True)
             sha = digest(path)
             if sha != item["sha256"] or path.stat().st_size != item["size_bytes"]:
                 raise RuntimeError("Frozen input differs: " + str(path))
-            validation.append(dict(path=str(path), size_bytes=path.stat().st_size, sha256=sha))
+            validation.append(dict(path=str(path), original_path=str(original),size_bytes=path.stat().st_size,sha256=sha))
         source_archive = output / "native-source.tar.gz"
         with tarfile.open(source_archive, "w:gz") as packed:
             for directory in (root / "src", root / "include"):
@@ -146,19 +164,23 @@ def main():
         shutil.copy2(app.parent / "CMakeCache.txt", output / "CMakeCache.txt")
         manifest = dict(created_utc=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), platform=platform.platform(),
                         cpu_count=os.cpu_count(), compiler=subprocess.check_output(["/usr/bin/c++", "--version"], text=True),
-                        native_sha256=digest(app), frozen_sha256=digest(old_app), source_sha256=digest(source_archive),
+                        native_sha256=digest(app), frozen_sha256=digest(old_app),
+                        before_sha256=digest(before_app) if before_app else None,source_sha256=digest(source_archive),
                         driver_sha256=digest(Path(__file__)), inputs=validation,
                         notes=["Fresh sequential processes; one warmup and five measured runs per variant.",
+                               "Timed native runs use normal commands; each final native variant has one separate profiling run.",
                                "Hashes and warmups may warm caches; cache state is uncontrolled, never called cold cache.",
                                "Frozen default has no thread option; native variants are 1, 4, and automatic.",
-                               "Outputs and native scratch are local to this campaign, outside NFS.",
+                               "Inputs, outputs and native scratch are local to this campaign, outside NFS.",
                                "GEO fill corrections can change extent/work; do not infer algorithmic speedups from that reduction.",
                                "PMR frozen metadata failure is recorded separately and is not a speed baseline."])
         save(output / "manifest.json", manifest)
         records = []
     else:
         manifest = json.loads((output / "manifest.json").read_text())
-        if digest(app) != manifest["native_sha256"] or digest(old_app) != manifest["frozen_sha256"]:
+        if digest(app) != manifest["native_sha256"] or digest(old_app) != manifest["frozen_sha256"] or \
+           bool(before_app) != bool(manifest.get("before_sha256")) or \
+           (before_app and digest(before_app) != manifest["before_sha256"]):
             raise RuntimeError("Cannot mix executable versions in a resumed campaign")
         if digest(Path(__file__)) != manifest["driver_sha256"]:
             raise RuntimeError("Cannot change measurement driver during a resumed campaign")
@@ -168,24 +190,28 @@ def main():
         records = json.loads((output / "metrics.json").read_text()) if (output / "metrics.json").exists() else []
         if any(not record.get("validated") for record in records):
             raise RuntimeError("Campaign has an unvalidated run; inspect it before starting a new campaign")
-    for name, expected in (("native", manifest["native_sha256"]), ("frozen", manifest["frozen_sha256"])):
+    executables = [("native",manifest["native_sha256"]),("frozen",manifest["frozen_sha256"])]
+    if manifest.get("before_sha256"): executables.append(("before",manifest["before_sha256"]))
+    for name, expected in executables:
         if digest(output / "executables" / name) != expected:
             raise RuntimeError("Campaign executable changed")
     scratch = output / "scratch"
     scratch.mkdir(exist_ok=True)
     completed = {(item["case"], item["variant"], item["iteration"]) for item in records}
+    input_paths = {item["original_path"] for item in manifest["inputs"]}
+    variants = [("frozen-default","frozen",None,False)]
+    if manifest.get("before_sha256"): variants.append(("native-before-auto","before",None,False))
+    variants += [("native-t1","native",1,True),("native-t4","native",4,True),("native-auto","native",None,True)]
     for case in args.cases:
-        original = old_cases[case][1:]
-        for variant, threads in (("frozen-default", None), ("native-t1", 1), ("native-t4", 4), ("native-auto", 0)):
+        original = [remap_path(value,input_paths,data_root) for value in old_cases[case][1:]]
+        for variant, executable_name, threads, profile_variant in variants:
             directory = output / case / variant
             directory.mkdir(parents=True, exist_ok=True)
-            for iteration in range(6):
-                if (case, variant, iteration) in completed:
-                    continue
-                stem = "warmup" if iteration == 0 else "repeat-" + str(iteration)
+            def command_for(stem, profile):
                 command = list(original)
                 if "--job" in command:
-                    job = json.loads(Path(command[command.index("--job") + 1]).read_text())
+                    job_path_source = Path(old_cases[case][old_cases[case].index("--job") + 1])
+                    job = remap_job(json.loads(job_path_source.read_text()),input_paths,data_root)
                     image = directory / (stem + Path(job["output"]).suffix)
                     job["output"] = str(image)
                     job_path = directory / (stem + ".json")
@@ -195,30 +221,28 @@ def main():
                     index = command.index("-o") + 1
                     image = directory / (stem + Path(command[index]).suffix)
                     command[index] = str(image)
-                executable = output / "executables" / ("frozen" if threads is None else "native")
-                command = [str(executable), *command]
-                if threads is not None:
-                    command += ["--threads", str(threads), "--profile", "--scratch-dir", str(scratch)]
+                command = [str(output / "executables" / executable_name), *command]
+                if threads is not None: command += ["--threads", str(threads)]
+                if profile: command += ["--profile", "--scratch-dir", str(scratch)]
+                return command,image
+            for iteration in range(6):
+                if (case, variant, iteration) in completed:
+                    continue
+                stem = "warmup" if iteration == 0 else "repeat-" + str(iteration)
+                command,image = command_for(stem,False)
                 save(output / "current-run.json", dict(case=case, variant=variant, iteration=iteration, command=command))
                 print("Starting", case, variant, stem, flush=True)
                 result = measure(command, directory, stem)
                 result.update(case=case, variant=variant, iteration=iteration, warmup=iteration == 0)
                 records.append(result)
                 save(output / "metrics.json", records)
-                if threads is not None:
-                    profile = json.loads(Path(str(image) + ".profile.json").read_text())
-                    result["profile"] = profile
-                    if profile["success"] is not True or profile["scratch_bytes"] != 0:
-                        raise RuntimeError("Native run failed or leaked its cache")
-                    if any(buffer["current_bytes"] for buffer in profile["buffers"].values()):
-                        raise RuntimeError("Native buffer retained after render")
                 if result["returncode"] == 0:
                     result["image"] = image_info(image)
                     result["image_sha256"] = digest(image)
                     result["image_bytes"] = image.stat().st_size
                     if case == "fy4b_4km_rtec16" and (result["image"]["depth"] != 16 or result["image"]["compression"] != 8):
                         raise RuntimeError("RTEC16 must use RGB16 TIFF with Adobe Deflate for both versions")
-                expected_code = 2 if threads is None and case == "pmr_surface" else 0
+                expected_code = 2 if executable_name == "frozen" and case == "pmr_surface" else 0
                 result["validated"] = result["returncode"] == expected_code
                 save(output / "metrics.json", records)
                 save(output / "summary.json", summarize(records))
@@ -226,8 +250,35 @@ def main():
                       round(result["peak_rss_bytes"] / 1048576, 1), "MiB", "exit", result["returncode"], flush=True)
                 if result["returncode"] != expected_code:
                     raise RuntimeError("Benchmark exited unexpectedly; see saved logs")
+            if profile_variant:
+                command,image = command_for("profile",True)
+                record_path = directory / "profile-run.json"
+                if record_path.exists():
+                    profiled = json.loads(record_path.read_text())
+                    if profiled["command"] != command:
+                        raise RuntimeError("Profile command differs during resume")
+                else:
+                    save(output / "current-run.json", dict(case=case,variant=variant,profile=True,command=command))
+                    print("Profiling",case,variant,flush=True)
+                    profiled = measure(command,directory,"profile")
+                    if profiled["returncode"] != 0:
+                        raise RuntimeError("Profile run exited unexpectedly; see saved logs")
+                    profiled["profile"] = json.loads(Path(str(image) + ".profile.json").read_text())
+                    profiled["image"] = image_info(image)
+                    profiled["image_sha256"] = digest(image)
+                    profiled["image_bytes"] = image.stat().st_size
+                    save(record_path,profiled)
+                profile = profiled["profile"]
+                if profile["success"] is not True or profile["scratch_bytes"] != 0:
+                    raise RuntimeError("Native profile failed or leaked its cache")
+                if any(buffer["current_bytes"] for buffer in profile["buffers"].values()):
+                    raise RuntimeError("Native buffer retained after render")
+                if digest(image) != profiled["image_sha256"] or image_info(image) != profiled["image"]:
+                    raise RuntimeError("Profile output changed")
     save(output / "completion.json", dict(completed_selected_cases=list(args.cases), records=len(records),
-                                          native_sha256=manifest["native_sha256"], all_cases=len(records) == len(CASES) * 24))
+                                          native_sha256=manifest["native_sha256"],
+                                          profiles=len(args.cases) * 3,
+                                          all_cases=len(records) == len(CASES) * len(variants) * 6))
 
 
 if __name__ == "__main__":

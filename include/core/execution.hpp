@@ -19,10 +19,11 @@ public:
     ~ScratchDirectory();
     ScratchDirectory(const ScratchDirectory&) = delete;
     ScratchDirectory& operator=(const ScratchDirectory&) = delete;
-    const std::filesystem::path& path() const noexcept { return path_; }
+    const std::filesystem::path& path() const;
     std::uint64_t bytes() const;
 private:
-    std::filesystem::path path_;
+    std::filesystem::path base_;
+    mutable std::filesystem::path path_;
 };
 
 class ExecutionContext {

@@ -39,7 +39,7 @@ ScalarPlane load_plane(SensorSession& session,const BandDescriptor& band,Window 
         const auto offset = (tile.samples.window.row - window.row) * shape.cols;
         std::memcpy(plane.values.values().data() + offset,tile.samples.values.values().data(),tile.samples.values.bytes());
         std::memcpy(plane.valid.values().data() + offset,tile.samples.valid.values().data(),tile.samples.valid.bytes());
-    },256,invalid,raw_samples ? std::optional(CalibrationDescriptor{}) : std::nullopt);
+    },0,invalid,raw_samples ? std::optional(CalibrationDescriptor{}) : std::nullopt);
     return plane;
 }
 

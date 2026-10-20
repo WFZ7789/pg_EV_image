@@ -82,6 +82,7 @@ struct RasterOptions {
     std::size_t tile_size = 64;
     int bit_depth = 8;
     bool keep_coverage = false;
+    bool exact_coverage = true;
     std::size_t source_cache_bytes = 16 * 1024 * 1024;
 };
 

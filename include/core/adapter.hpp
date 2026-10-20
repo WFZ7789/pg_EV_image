@@ -47,6 +47,7 @@ public:
     virtual ~SensorAdapter() = default;
     virtual SensorMetadata metadata() const = 0;
     virtual std::vector<BandDescriptor> bands() const = 0;
+    virtual std::size_t preferred_block_rows(int band, Window window);
     virtual SampleBlock read_window(int band, Window window) = 0;
     virtual NativeGeometry read_geometry(const std::string& grid, Window window) = 0;
 };
@@ -61,6 +62,7 @@ public:
 
     SensorMetadata metadata() const;
     std::vector<BandDescriptor> bands() const;
+    std::size_t preferred_block_rows(int band, Window window) const;
     SampleBlock read_window(int band, Window window);
     NativeGeometry read_geometry(const std::string& grid, Window window);
 

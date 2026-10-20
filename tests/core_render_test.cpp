@@ -173,6 +173,17 @@ int main() {
             }
     }
     {
+        auto large = rectangle(0,0,8,8,{1,0,0});
+        const std::vector<SwathRasterSource> sources{large.view()};
+        auto configured = options({8,8});
+        configured.exact_coverage = false;
+        configured.keep_coverage = false;
+        auto result = rasterize_swaths(sources,configured,context);
+        for (const auto pixel : std::get<Raster<Pixel8>>(result.pixels).values())
+            require(pixel.bgr == std::array<std::uint8_t,3>{0,0,255});
+        require(!result.coverage);
+    }
+    {
         OwnedSource dense{Raster<PixelPoint>({129,129}),Raster<float>({128,128}),Raster<std::uint8_t>({128,128}),{1,1,1}};
         for (std::size_t row = 0; row <= 128; ++row)
             for (std::size_t col = 0; col <= 128; ++col)
@@ -185,10 +196,14 @@ int main() {
         const std::vector<SwathRasterSource> sources{dense.view()};
         for (int threads : {1,4}) {
             ExecutionContext executor({.threads = threads});
-            auto result = rasterize_swaths(sources,options({4,4},16,2),executor);
-            for (auto pixel : std::get<Raster<Pixel16>>(result.pixels).values())
-                require(pixel.bgr == std::array<std::uint16_t,3>{65471,65471,65471});
-            for (auto coverage : result.coverage->values()) require(coverage == 1023.0f / 1024);
+            for (bool exact : {true,false}) {
+                auto configured = options({4,4},16,2);
+                configured.exact_coverage = exact;
+                auto result = rasterize_swaths(sources,configured,executor);
+                for (auto pixel : std::get<Raster<Pixel16>>(result.pixels).values())
+                    require(pixel.bgr == std::array<std::uint16_t,3>{65471,65471,65471});
+                for (auto coverage : result.coverage->values()) require(coverage == 1023.0f / 1024);
+            }
         }
     }
     {

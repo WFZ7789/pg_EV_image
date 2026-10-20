@@ -10,6 +10,10 @@
 
 namespace fy::core {
 
+std::size_t SensorAdapter::preferred_block_rows(int,Window window) {
+    return std::min<std::size_t>(256,window.shape.rows);
+}
+
 struct IoChannel::Impl {
     std::mutex mutex;
     std::condition_variable ready;
@@ -86,6 +90,15 @@ SensorMetadata SensorSession::metadata() const {
 std::vector<BandDescriptor> SensorSession::bands() const {
     if (!impl_) throw std::logic_error("Moved sensor session");
     return impl_->channel->run([this] { return impl_->adapter->bands(); });
+}
+
+std::size_t SensorSession::preferred_block_rows(int band,Window window) const {
+    if (!impl_) throw std::logic_error("Moved sensor session");
+    return impl_->channel->run([this,band,window] {
+        const auto rows = impl_->adapter->preferred_block_rows(band,window);
+        if (!rows || rows > window.shape.rows) throw std::invalid_argument("Adapter returned invalid block rows");
+        return rows;
+    });
 }
 
 SampleBlock SensorSession::read_window(int band, Window window) {

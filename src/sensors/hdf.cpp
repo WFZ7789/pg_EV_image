@@ -16,7 +16,7 @@ namespace {
 using namespace core;
 
 struct Access {
-    std::optional<ProfileReport> report;
+    mutable std::optional<ProfileReport> report;
 
     void note(std::size_t logical, std::size_t decoded, std::size_t samples) const {
         if (report) report->record_io({logical, decoded, 1, samples});
@@ -81,6 +81,56 @@ struct Access {
         return result;
     }
 
+    template<class T>
+    std::vector<float> read_as(const H5::DataSet& dataset,const H5::DataType& memory_type,
+                               const H5::DataSpace& memory,const H5::DataSpace& selection,
+                               std::size_t size) const {
+        std::vector<T> native(size);
+        if (report) {
+            auto phase = report->phase("hdf_read");
+            dataset.read(native.data(),memory_type,memory,selection);
+        } else dataset.read(native.data(),memory_type,memory,selection);
+        std::vector<float> values;
+        if constexpr (std::is_same_v<T,float>) values = std::move(native);
+        else values.resize(size);
+        if constexpr (!std::is_same_v<T,float>) {
+            const auto convert = [&] {
+                std::transform(native.begin(),native.end(),values.begin(),
+                               [](T value) { return static_cast<float>(value); });
+            };
+            if (report) { auto phase = report->phase("hdf_convert"); convert(); }
+            else convert();
+        }
+        return values;
+    }
+
+    std::vector<float> read(const H5::DataSet& dataset,const H5::DataSpace& memory,
+                            const H5::DataSpace& selection,std::size_t size) const {
+        const auto type = dataset.getDataType();
+        std::vector<float> values;
+        if (type.getClass() == H5T_INTEGER) {
+            const H5::IntType integer(type.getId());
+            const bool sign = integer.getSign() != H5T_SGN_NONE;
+            switch (type.getSize()) {
+                case 1: values = sign ? read_as<signed char>(dataset,H5::PredType::NATIVE_SCHAR,memory,selection,size)
+                                      : read_as<unsigned char>(dataset,H5::PredType::NATIVE_UCHAR,memory,selection,size); break;
+                case 2: values = sign ? read_as<short>(dataset,H5::PredType::NATIVE_SHORT,memory,selection,size)
+                                      : read_as<unsigned short>(dataset,H5::PredType::NATIVE_USHORT,memory,selection,size); break;
+                case 4: values = sign ? read_as<int>(dataset,H5::PredType::NATIVE_INT,memory,selection,size)
+                                      : read_as<unsigned int>(dataset,H5::PredType::NATIVE_UINT,memory,selection,size); break;
+                case 8: values = sign ? read_as<long long>(dataset,H5::PredType::NATIVE_LLONG,memory,selection,size)
+                                      : read_as<unsigned long long>(dataset,H5::PredType::NATIVE_ULLONG,memory,selection,size); break;
+                default: throw std::invalid_argument("Unsupported HDF integer width");
+            }
+        } else if (type.getClass() == H5T_FLOAT && type.getSize() == sizeof(float)) {
+            values = read_as<float>(dataset,H5::PredType::NATIVE_FLOAT,memory,selection,size);
+        } else if (type.getClass() == H5T_FLOAT && type.getSize() == sizeof(double)) {
+            values = read_as<double>(dataset,H5::PredType::NATIVE_DOUBLE,memory,selection,size);
+        } else throw std::invalid_argument("Unsupported HDF numeric type");
+        note(size * type.getSize(),size * sizeof(float),size);
+        return values;
+    }
+
     std::vector<float> read(const H5::DataSet& dataset, std::span<const hsize_t> origin,
                             std::span<const hsize_t> count) const {
         if (origin.size() != count.size()) throw std::invalid_argument("Incorrect HDF window rank");
@@ -97,10 +147,7 @@ struct Access {
         auto selection = dataset.getSpace();
         selection.selectHyperslab(H5S_SELECT_SET, count.data(), origin.data());
         H5::DataSpace memory(static_cast<int>(count.size()), count.data());
-        std::vector<float> values(size);
-        dataset.read(values.data(), H5::PredType::NATIVE_FLOAT, memory, selection);
-        note(size * dataset.getDataType().getSize(), size * sizeof(float), size);
-        return values;
+        return read(dataset,memory,selection,size);
     }
 };
 
@@ -283,12 +330,26 @@ public:
         return result;
     }
 
+    std::size_t preferred_block_rows(int band,Window window) override {
+        const auto& field = fields_.at(band);
+        auto& dataset = open_dataset(field.band.source,field.band.dataset);
+        const auto& dimensions = dataset_info(field.band.source,field.band.dataset).dimensions;
+        if (field.flat_spatial) return window.shape.rows;
+        const auto properties = dataset.getCreatePlist();
+        if (properties.getLayout() != H5D_CHUNKED) return window.shape.rows;
+        std::vector<hsize_t> chunk(dimensions.size());
+        properties.getChunk(static_cast<int>(chunk.size()),chunk.data());
+        std::size_t spatial_axis = 0;
+        while (static_cast<int>(spatial_axis) == field.channel_axis) ++spatial_axis;
+        return std::min<std::size_t>(window.shape.rows,std::max<hsize_t>(256,chunk.at(spatial_axis)));
+    }
+
     SampleBlock read_window(int band, Window window) override try {
         const auto& field = fields_.at(band);
         const auto& descriptor = field.band;
         window.validate(metadata_.grid(descriptor.grid).shape);
-        auto dataset = file(descriptor.source).openDataSet(descriptor.dataset);
-        auto dims = Access::dimensions(dataset);
+        auto& dataset = open_dataset(descriptor.source,descriptor.dataset);
+        const auto& dims = dataset_info(descriptor.source,descriptor.dataset).dimensions;
         std::vector<float> raw;
         if (field.flat_spatial) {
             const auto spatial = 1 - field.channel_axis;
@@ -301,9 +362,7 @@ public:
             selection.selectHyperslab(H5S_SELECT_SET,count,origin,stride,block);
             const hsize_t memory_shape[]{window.shape.rows,window.shape.cols};
             H5::DataSpace memory(2,memory_shape);
-            raw.resize(window.shape.elements());
-            dataset.read(raw.data(),H5::PredType::NATIVE_FLOAT,memory,selection);
-            access_.note(raw.size() * dataset.getDataType().getSize(),raw.size() * sizeof(float),raw.size());
+            raw = access_.read(dataset,memory,selection,window.shape.elements());
         } else {
             std::vector<hsize_t> origin(dims.size(), 0), count = dims;
             std::size_t spatial_axis = 0;
@@ -317,15 +376,56 @@ public:
                     ++spatial_axis;
                 }
             }
-            raw = access_.read(dataset, origin, count);
+            raw = access_.read(dataset,origin,count);
         }
+        std::vector<std::uint8_t> raw_valid(raw.size());
+        const bool integer_source = dataset.getDataType().getClass() == H5T_INTEGER;
+        const auto validate = [&] {
+            std::vector<float> excluded;
+            for (double fill : descriptor.fill_values)
+                if (std::isfinite(fill) && (!descriptor.valid_range ||
+                    (fill >= (*descriptor.valid_range)[0] && fill <= (*descriptor.valid_range)[1])))
+                    excluded.push_back(static_cast<float>(fill));
+            if (descriptor.valid_range && excluded.empty()) {
+                const auto [low,high] = *descriptor.valid_range;
+                if (integer_source)
+                    for (std::size_t i = 0; i < raw.size(); ++i)
+                        raw_valid[i] = raw[i] >= low && raw[i] <= high;
+                else
+                    for (std::size_t i = 0; i < raw.size(); ++i)
+                        raw_valid[i] = std::isfinite(raw[i]) && raw[i] >= low && raw[i] <= high;
+            } else if (descriptor.valid_range && excluded.size() == 1) {
+                const auto [low,high] = *descriptor.valid_range;
+                const float fill = excluded.front();
+                if (integer_source)
+                    for (std::size_t i = 0; i < raw.size(); ++i)
+                        raw_valid[i] = raw[i] >= low && raw[i] <= high && raw[i] != fill;
+                else
+                    for (std::size_t i = 0; i < raw.size(); ++i)
+                        raw_valid[i] = std::isfinite(raw[i]) && raw[i] >= low && raw[i] <= high && raw[i] != fill;
+            } else if (!descriptor.valid_range && excluded.empty()) {
+                if (integer_source) std::fill(raw_valid.begin(),raw_valid.end(),std::uint8_t{1});
+                else for (std::size_t i = 0; i < raw.size(); ++i) raw_valid[i] = std::isfinite(raw[i]);
+            } else if (!descriptor.valid_range && excluded.size() == 1) {
+                const float fill = excluded.front();
+                if (integer_source)
+                    for (std::size_t i = 0; i < raw.size(); ++i) raw_valid[i] = raw[i] != fill;
+                else
+                    for (std::size_t i = 0; i < raw.size(); ++i)
+                        raw_valid[i] = std::isfinite(raw[i]) && raw[i] != fill;
+            } else {
+                for (std::size_t i = 0; i < raw.size(); ++i) {
+                    const float value = raw[i];
+                    raw_valid[i] = std::isfinite(value) && !filled(value,descriptor.fill_values) &&
+                        (!descriptor.valid_range ||
+                         (value >= (*descriptor.valid_range)[0] && value <= (*descriptor.valid_range)[1]));
+                }
+            }
+        };
+        if (access_.report) { auto phase = access_.report->phase("hdf_validate"); validate(); }
+        else validate();
         Raster<float> values(window.shape, std::move(raw));
-        Raster<std::uint8_t> valid(window.shape);
-        for (std::size_t i = 0; i < values.values().size(); ++i) {
-            const float value = values.values()[i];
-            valid.values()[i] = std::isfinite(value) && !filled(value, descriptor.fill_values) &&
-                (!descriptor.valid_range || (value >= (*descriptor.valid_range)[0] && value <= (*descriptor.valid_range)[1]));
-        }
+        Raster<std::uint8_t> valid(window.shape,std::move(raw_valid));
         return {band, window, std::move(values), std::move(valid)};
     } catch (const H5::Exception& error) {
         throw std::runtime_error("HDF5 window read: " + error.getDetailMsg());
@@ -349,8 +449,8 @@ public:
         window.validate(metadata_.grid(grid).shape);
         std::vector<hsize_t> origin{window.row,window.col}, count{window.shape.rows,window.shape.cols};
         if (coordinates.channel_axis == 2) { origin.push_back(0); count.push_back(1); }
-        auto latitude = file(coordinates.source).openDataSet(coordinates.latitude);
-        auto longitude = file(coordinates.source).openDataSet(coordinates.longitude);
+        auto& latitude = open_dataset(coordinates.source,coordinates.latitude);
+        auto& longitude = open_dataset(coordinates.source,coordinates.longitude);
         const auto read = [&](const H5::DataSet& dataset) {
             if (!coordinates.flat_spatial) return access_.read(dataset,origin,count);
             const auto shape = metadata_.grid(grid).shape;
@@ -359,10 +459,7 @@ public:
             auto selection = dataset.getSpace();
             selection.selectHyperslab(H5S_SELECT_SET,blocks,start,stride,width);
             H5::DataSpace memory(2,memory_shape);
-            std::vector<float> values(window.shape.elements());
-            dataset.read(values.data(),H5::PredType::NATIVE_FLOAT,memory,selection);
-            access_.note(values.size() * dataset.getDataType().getSize(),values.size() * sizeof(float),values.size());
-            return values;
+            return access_.read(dataset,memory,selection,window.shape.elements());
         };
         auto lat = read(latitude), lon = read(longitude);
         Raster<std::uint8_t> valid(window.shape);
@@ -380,6 +477,12 @@ public:
     }
 
 private:
+    struct DatasetInfo {
+        std::vector<hsize_t> dimensions;
+        std::string name;
+        std::vector<double> fills,range,slope,intercept;
+    };
+
     Access access_;
     std::array<std::unique_ptr<H5::H5File>, 3> files_;
     SensorMetadata metadata_;
@@ -387,12 +490,40 @@ private:
     std::map<std::string, Coordinates> coordinates_;
     std::map<std::string, NativeDiskGeometry> disks_;
     std::set<std::string> images_;
+    std::map<std::pair<SourceRole,std::string>,H5::DataSet> datasets_;
+    std::map<std::pair<SourceRole,std::string>,DatasetInfo> dataset_info_;
 
     H5::H5File& file(SourceRole source) const {
         const auto index = static_cast<std::size_t>(source);
         if (files_[index]) return *files_[index];
         if (source == SourceRole::geolocation) return *files_[0];
         throw std::invalid_argument("Missing HDF source file");
+    }
+
+    H5::DataSet& open_dataset(SourceRole source,const std::string& path) {
+        auto key = std::pair{source,path};
+        auto found = datasets_.find(key);
+        if (found == datasets_.end())
+            found = datasets_.emplace(std::move(key),file(source).openDataSet(path)).first;
+        return found->second;
+    }
+
+    const DatasetInfo& dataset_info(SourceRole source,const std::string& path) {
+        auto key = std::pair{source,path};
+        auto found = dataset_info_.find(key);
+        if (found != dataset_info_.end()) return found->second;
+        auto& dataset = open_dataset(source,path);
+        DatasetInfo result;
+        result.dimensions = Access::dimensions(dataset);
+        result.name = access_.text(dataset,"long_name",false);
+        result.fills = access_.fills(dataset);
+        result.range = access_.attribute(dataset,"valid_range");
+        if (result.range.empty() && dataset.attrExists("Valid_Range") &&
+            dataset.openAttribute("Valid_Range").getSpace().getSimpleExtentNpoints() > 0)
+            result.range = access_.attribute(dataset,"Valid_Range");
+        result.slope = access_.attribute(dataset,"Slope");
+        result.intercept = access_.attribute(dataset,"Intercept");
+        return dataset_info_.emplace(std::move(key),std::move(result)).first->second;
     }
 
     void validate_pair(const H5::H5File& other, const std::filesystem::path& data,
@@ -436,8 +567,8 @@ private:
 
     Field describe(int id, SourceRole source, std::string path, const std::string& grid,
                    int axis, std::size_t channel, bool linear = true,bool flat_spatial = false) {
-        auto dataset = file(source).openDataSet(path);
-        auto dims = Access::dimensions(dataset);
+        const auto& cached = dataset_info(source,path);
+        const auto& dims = cached.dimensions;
         if (flat_spatial && (dims.size() != 2 || axis < 0 || axis > 1))
             throw std::invalid_argument("Flattened observation grid requires two dataset axes");
         std::vector<std::size_t> shape;
@@ -454,15 +585,12 @@ private:
         auto& band = field.band;
         band.id = id; band.source = source; band.dataset = std::move(path); band.grid = grid;
         band.unit = "DN";
-        band.name = access_.text(dataset, "long_name", false);
+        band.name = cached.name;
         band.channel_index = channel;
         band.channel_axis = axis < 0 ? ChannelAxis::none : axis == 0 ? ChannelAxis::first :
                             static_cast<std::size_t>(axis) + 1 == dims.size() ? ChannelAxis::last : ChannelAxis::middle;
-        band.fill_values = access_.fills(dataset);
-        auto range = access_.attribute(dataset, "valid_range");
-        if (range.empty() && dataset.attrExists("Valid_Range") &&
-            dataset.openAttribute("Valid_Range").getSpace().getSimpleExtentNpoints() > 0)
-            range = access_.attribute(dataset,"Valid_Range");
+        band.fill_values = cached.fills;
+        const auto& range = cached.range;
         if (!range.empty()) {
             if (range.size() != 2 || range[0] > range[1]) throw std::invalid_argument("Invalid HDF valid range");
             band.valid_range = std::array<double, 2>{range[0], range[1]};
@@ -471,10 +599,14 @@ private:
         if (linear) {
             band.calibration.kind = CalibrationKind::linear;
             band.calibration.provenance = band.dataset + " attributes Slope/Intercept";
-            if (!dataset.attrExists("Slope") || !dataset.attrExists("Intercept"))
+            if (cached.slope.empty() || cached.intercept.empty())
                 throw std::invalid_argument("Missing band calibration attributes: " + band.dataset);
-            band.calibration.coefficients = {access_.coefficient(dataset, "Slope", channel, 1),
-                                             access_.coefficient(dataset, "Intercept", channel, 0)};
+            const auto coefficient = [channel](const std::vector<double>& values,const std::string& key) {
+                if (values.size() == 1) return values[0];
+                if (channel >= values.size()) throw std::invalid_argument("Calibration attribute too short: " + key);
+                return values[channel];
+            };
+            band.calibration.coefficients = {coefficient(cached.slope,"Slope"),coefficient(cached.intercept,"Intercept")};
         }
         return field;
     }

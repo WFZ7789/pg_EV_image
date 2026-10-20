@@ -101,7 +101,7 @@ void render_native_giirs(const Request& request,ExecutionContext& context) {
             source.valid.front() = crop->view();
         }
         RasterOptions options;
-        options.layout = map->layout;
+        options.layout = map->layout; options.exact_coverage = false;
         auto rendered = rasterize_swaths(std::span(&source,1),options,context);
         save_frame(rendered,*map,product,request,path,context);
     };
@@ -254,7 +254,7 @@ void render_native_mosaic(const Request& request,ExecutionContext& context) {
     products::PreparedProduct legend;
     legend.display = caches.front()->display(); legend.labels = caches.front()->labels(); legend.extra_label = caches.front()->extra_label();
     RasterOptions options;
-    options.layout = map.layout; options.overlap = OverlapPolicy::scan_center;
+    options.layout = map.layout; options.overlap = OverlapPolicy::scan_center; options.exact_coverage = false;
     auto rendered = rasterize_swaths(sources,options,context);
     save_frame(rendered,map,legend,request,path,context);
 }

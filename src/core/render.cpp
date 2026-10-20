@@ -96,7 +96,13 @@ struct Point {
     double x, y;
 };
 
-using Polygon = std::pmr::vector<Point>;
+struct Polygon {
+    std::array<Point,8> points{};
+    std::size_t size = 0;
+
+    Point& operator[](std::size_t index) { return points[index]; }
+    const Point& operator[](std::size_t index) const { return points[index]; }
+};
 
 double cross(Point a, Point b, Point c) {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
@@ -113,6 +119,47 @@ double signed_area(const Quad& quad) {
 }
 
 double area(const Polygon& polygon) {
+    if (polygon.size < 3) return 0;
+    double result = 0;
+    for (std::size_t i = 0; i < polygon.size; ++i) {
+        const auto& a = polygon[i];
+        const auto& b = polygon[(i + 1) % polygon.size];
+        result += a.x * b.y - a.y * b.x;
+    }
+    return std::abs(result) * 0.5;
+}
+
+Polygon clip(const Polygon& polygon,Point a,Point b,double orientation) {
+    Polygon result;
+    if (!polygon.size) return result;
+    auto previous = polygon[polygon.size - 1];
+    auto previous_distance = orientation * cross(a, b, previous);
+    bool previous_kept = previous_distance >= 0;
+    for (std::size_t i = 0; i < polygon.size; ++i) {
+        const auto current = polygon[i];
+        const auto distance = orientation * cross(a, b, current);
+        const bool kept = distance >= 0;
+        if (kept != previous_kept) {
+            const auto t = previous_distance / (previous_distance - distance);
+            result.points[result.size++] = {previous.x + t * (current.x - previous.x),
+                                            previous.y + t * (current.y - previous.y)};
+        }
+        if (kept) result.points[result.size++] = current;
+        previous = current;
+        previous_distance = distance;
+        previous_kept = kept;
+    }
+    return result;
+}
+
+struct PixelWork {
+    Color sum{0,0,0,0};
+    double coverage = 0;
+};
+
+using DynamicPolygon = std::pmr::vector<Point>;
+
+double dynamic_area(const DynamicPolygon& polygon) {
     if (polygon.size() < 3) return 0;
     double result = 0;
     for (std::size_t i = 0; i < polygon.size(); ++i) {
@@ -123,16 +170,16 @@ double area(const Polygon& polygon) {
     return std::abs(result) * 0.5;
 }
 
-Polygon clip(const Polygon& polygon, Point a, Point b, double orientation, bool inside,
-             std::pmr::memory_resource* memory) {
-    Polygon result(memory);
+DynamicPolygon dynamic_clip(const DynamicPolygon& polygon,Point a,Point b,double orientation,bool inside,
+                            std::pmr::memory_resource* memory) {
+    DynamicPolygon result(memory);
     if (polygon.empty()) return result;
     result.reserve(polygon.size() + 1);
     auto previous = polygon.back();
-    auto previous_distance = orientation * cross(a, b, previous);
+    auto previous_distance = orientation * cross(a,b,previous);
     bool previous_kept = inside ? previous_distance >= 0 : previous_distance <= 0;
-    for (const auto& current : polygon) {
-        const auto distance = orientation * cross(a, b, current);
+    for (const auto current : polygon) {
+        const auto distance = orientation * cross(a,b,current);
         const bool kept = inside ? distance >= 0 : distance <= 0;
         if (kept != previous_kept) {
             const auto t = previous_distance / (previous_distance - distance);
@@ -152,43 +199,41 @@ public:
     explicit TrackedMemory(ProfileReport& report) : report_(report) {}
 private:
     ProfileReport& report_;
-    std::map<void*, ProfileReport::BufferReservation> allocations_;
+    std::map<void*,ProfileReport::BufferReservation> allocations_;
 
-    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
-        auto reservation = report_.reserve(BufferKind::worker_tiles, bytes);
-        auto* result = std::pmr::new_delete_resource()->allocate(bytes, alignment);
-        try { allocations_.emplace(result, std::move(reservation)); }
+    void* do_allocate(std::size_t bytes,std::size_t alignment) override {
+        auto reservation = report_.reserve(BufferKind::worker_tiles,bytes);
+        auto* result = std::pmr::new_delete_resource()->allocate(bytes,alignment);
+        try { allocations_.emplace(result,std::move(reservation)); }
         catch (...) {
-            std::pmr::new_delete_resource()->deallocate(result, bytes, alignment);
+            std::pmr::new_delete_resource()->deallocate(result,bytes,alignment);
             throw;
         }
         return result;
     }
-    void do_deallocate(void* pointer, std::size_t bytes, std::size_t alignment) override {
-        std::pmr::new_delete_resource()->deallocate(pointer, bytes, alignment);
+    void do_deallocate(void* pointer,std::size_t bytes,std::size_t alignment) override {
+        std::pmr::new_delete_resource()->deallocate(pointer,bytes,alignment);
         allocations_.erase(pointer);
     }
     bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
 };
 
-struct Fragment {
-    Polygon polygon;
-    double left = INFINITY, right = -INFINITY, top = INFINITY, bottom = -INFINITY;
+struct ExactFragment {
+    DynamicPolygon polygon;
+    double left = INFINITY,right = -INFINITY,top = INFINITY,bottom = -INFINITY;
 
-    explicit Fragment(Polygon&& points) : polygon(std::move(points)) {
-        for (auto point : polygon) {
+    explicit ExactFragment(DynamicPolygon&& points) : polygon(std::move(points)) {
+        for (const auto point : polygon) {
             left = std::min(left,point.x); right = std::max(right,point.x);
             top = std::min(top,point.y); bottom = std::max(bottom,point.y);
         }
     }
 };
 
-struct PixelWork {
-    Color sum{0,0,0,0};
-    double coverage = 0;
+struct ExactState {
     bool initialized = false;
-    std::pmr::vector<Fragment> free;
-    explicit PixelWork(std::pmr::memory_resource* memory) : free(memory) {}
+    std::pmr::vector<ExactFragment> free;
+    explicit ExactState(std::pmr::memory_resource* memory) : free(memory) {}
 };
 
 struct Extent {
@@ -228,11 +273,81 @@ std::optional<Extent> extent(const SwathRasterSource& source, std::size_t index,
     return Extent{x0,x1,y0,y1};
 }
 
-void contribute(PixelWork& pixel, const Quad& quad, std::size_t x, std::size_t y, Color color,
-                std::pmr::memory_resource* memory) {
-    if (pixel.initialized && pixel.free.empty()) return;
+void contribute(PixelWork& pixel,const Quad& quad,std::size_t x,std::size_t y,Color color) {
+    if (pixel.coverage >= 1) return;
     std::array<Point,4> local;
     for (std::size_t i = 0; i < 4; ++i) local[i] = {double(quad[i].x) - x, double(quad[i].y) - y};
+    const double orientation = signed_area(quad) > 0 ? 1 : -1;
+    auto accumulate = [&](double covered) {
+        covered = std::min(covered,1 - pixel.coverage);
+        pixel.coverage += covered;
+        pixel.sum.red += covered * color.alpha * color.red;
+        pixel.sum.green += covered * color.alpha * color.green;
+        pixel.sum.blue += covered * color.alpha * color.blue;
+    };
+    bool full = true;
+    for (std::size_t edge = 0; edge < 4 && full; ++edge) {
+        const auto a = local[edge],b = local[(edge + 1) % 4];
+        const double dx = (b.x - a.x) * orientation,dy = (a.y - b.y) * orientation;
+        full = dx * -a.y + dy * -a.x + std::min(0.0,dx) + std::min(0.0,dy) >= 0;
+    }
+    if (full) {
+        accumulate(1);
+        return;
+    }
+    Polygon inside;
+    inside.points = {{{0,0},{1,0},{1,1},{0,1}}};
+    inside.size = 4;
+    for (std::size_t edge = 0; edge < 4 && inside.size; ++edge)
+        inside = clip(inside,local[edge],local[(edge + 1) % 4],orientation);
+    accumulate(area(inside));
+}
+
+bool contribute_centers(std::span<PixelWork> pixels,const Quad& quad,const Extent& box,
+                        std::size_t left,std::size_t top,std::size_t width,std::size_t height,Color color) {
+    if (std::abs(signed_area(quad)) < 16) return false;
+    const auto first_y = std::max(top,box.top),last_y = std::min(top + height,box.bottom);
+    for (auto y = first_y; y < last_y; ++y) {
+        const double scan = double(y) + 0.5;
+        std::array<double,4> intersections{};
+        std::size_t count = 0;
+        for (std::size_t edge = 0; edge < 4; ++edge) {
+            const auto a = quad[edge],b = quad[(edge + 1) % 4];
+            if ((double(a.y) <= scan && scan < double(b.y)) || (double(b.y) <= scan && scan < double(a.y)))
+                intersections[count++] = a.x + (scan - a.y) * (double(b.x) - a.x) / (double(b.y) - a.y);
+        }
+        if (count < 2) continue;
+        const auto bounds = std::minmax_element(intersections.begin(),intersections.begin() + count);
+        const auto raw_first = static_cast<std::int64_t>(std::ceil(*bounds.first - 0.5));
+        const auto raw_last = static_cast<std::int64_t>(std::floor(*bounds.second - 0.5));
+        const auto first_x = static_cast<std::size_t>(std::max<std::int64_t>(left,raw_first));
+        const auto last_x = static_cast<std::size_t>(std::min<std::int64_t>(left + width - 1,raw_last));
+        if (raw_last < static_cast<std::int64_t>(left) || raw_first >= static_cast<std::int64_t>(left + width) || first_x > last_x)
+            continue;
+        for (auto x = first_x; x <= last_x; ++x) {
+            auto& pixel = pixels[(y - top) * width + x - left];
+            if (pixel.coverage <= 0) {
+                pixel.coverage = 1;
+                pixel.sum.red = color.alpha * color.red;
+                pixel.sum.green = color.alpha * color.green;
+                pixel.sum.blue = color.alpha * color.blue;
+            } else if (pixel.coverage < 1) {
+                const auto covered = 1 - pixel.coverage;
+                pixel.coverage = 1;
+                pixel.sum.red += covered * color.alpha * color.red;
+                pixel.sum.green += covered * color.alpha * color.green;
+                pixel.sum.blue += covered * color.alpha * color.blue;
+            }
+        }
+    }
+    return true;
+}
+
+void contribute_exact(PixelWork& pixel,ExactState& state,const Quad& quad,std::size_t x,std::size_t y,Color color,
+                      std::pmr::memory_resource* memory) {
+    if (state.initialized && state.free.empty()) return;
+    std::array<Point,4> local;
+    for (std::size_t i = 0; i < 4; ++i) local[i] = {double(quad[i].x) - x,double(quad[i].y) - y};
     const double orientation = signed_area(quad) > 0 ? 1 : -1;
     auto accumulate = [&](double covered) {
         pixel.coverage += covered;
@@ -248,47 +363,48 @@ void contribute(PixelWork& pixel, const Quad& quad, std::size_t x, std::size_t y
     }
     if (full) {
         accumulate(std::max(0.0,1 - pixel.coverage));
-        pixel.initialized = true; pixel.free.clear();
+        state.initialized = true;
+        state.free.clear();
         return;
     }
-    if (!pixel.initialized) {
-        Polygon square(memory);
+    if (!state.initialized) {
+        DynamicPolygon square(memory);
         square.assign({{0,0},{1,0},{1,1},{0,1}});
-        pixel.free.emplace_back(std::move(square));
-        pixel.initialized = true;
+        state.free.emplace_back(std::move(square));
+        state.initialized = true;
     }
     const double left = std::min({local[0].x,local[1].x,local[2].x,local[3].x});
     const double right = std::max({local[0].x,local[1].x,local[2].x,local[3].x});
     const double top = std::min({local[0].y,local[1].y,local[2].y,local[3].y});
     const double bottom = std::max({local[0].y,local[1].y,local[2].y,local[3].y});
-    std::pmr::vector<Fragment> remaining(memory);
+    std::pmr::vector<ExactFragment> remaining(memory);
     double covered = 0;
-    for (std::size_t index = 0; index < pixel.free.size();) {
-        auto& fragment = pixel.free[index];
+    for (std::size_t index = 0; index < state.free.size();) {
+        auto& fragment = state.free[index];
         bool disjoint = fragment.left >= right || fragment.right <= left || fragment.top >= bottom || fragment.bottom <= top;
         for (std::size_t edge = 0; edge < 4 && !disjoint; ++edge)
             disjoint = std::ranges::all_of(fragment.polygon,[&](Point point) {
                 return orientation * cross(local[edge],local[(edge + 1) % 4],point) <= 0;
             });
         if (disjoint) { ++index; continue; }
-        Polygon inside = std::move(fragment.polygon);
-        if (index + 1 != pixel.free.size()) fragment = std::move(pixel.free.back());
-        pixel.free.pop_back();
+        DynamicPolygon inside = std::move(fragment.polygon);
+        if (index + 1 != state.free.size()) fragment = std::move(state.free.back());
+        state.free.pop_back();
         for (std::size_t edge = 0; edge < 4 && !inside.empty(); ++edge) {
-            const auto a = local[edge], b = local[(edge + 1) % 4];
+            const auto a = local[edge],b = local[(edge + 1) % 4];
             if (std::ranges::all_of(inside,[&](Point point) { return orientation * cross(a,b,point) >= 0; })) continue;
             if (std::ranges::all_of(inside,[&](Point point) { return orientation * cross(a,b,point) <= 0; })) {
-                if (area(inside) > 1e-12) remaining.emplace_back(std::move(inside));
+                if (dynamic_area(inside) > 1e-12) remaining.emplace_back(std::move(inside));
                 inside.clear();
                 break;
             }
-            auto outside = clip(inside, a, b, orientation, false, memory);
-            if (area(outside) > 1e-12) remaining.emplace_back(std::move(outside));
-            inside = clip(inside, a, b, orientation, true, memory);
+            auto outside = dynamic_clip(inside,a,b,orientation,false,memory);
+            if (dynamic_area(outside) > 1e-12) remaining.emplace_back(std::move(outside));
+            inside = dynamic_clip(inside,a,b,orientation,true,memory);
         }
-        covered += area(inside);
+        covered += dynamic_area(inside);
     }
-    for (auto& fragment : remaining) pixel.free.push_back(std::move(fragment));
+    for (auto& fragment : remaining) state.free.push_back(std::move(fragment));
     accumulate(covered);
 }
 
@@ -304,6 +420,78 @@ std::uint64_t reference_key(const SwathRasterSource& source, std::size_t index, 
 std::uint32_t reference_index(std::uint64_t key, OverlapPolicy policy) {
     const auto index = static_cast<std::uint32_t>(key);
     return policy == OverlapPolicy::last_sample ? index : std::numeric_limits<std::uint32_t>::max() - index;
+}
+
+std::optional<RasterizedFrame> rasterize_large_last_sample(const SwathRasterSource& source,
+                                                           const RasterOptions& options,
+                                                           ExecutionContext& context) {
+    if (options.exact_coverage || options.keep_coverage || source.read_block ||
+        options.overlap != OverlapPolicy::last_sample)
+        return std::nullopt;
+    const auto shape = options.layout.map;
+    std::vector<std::optional<Extent>> boxes(source.cells.elements());
+    std::vector<Quad> quads(source.cells.elements());
+    for (std::size_t index = 0; index < source.cells.elements(); ++index) {
+        boxes[index] = extent(source,index,shape);
+        if (!boxes[index]) continue;
+        quads[index] = quad_at(source,index);
+        if (std::abs(signed_area(quads[index])) < 16) return std::nullopt;
+    }
+    RasterizedFrame result(options,context.profile());
+    auto phase = context.profile().phase("rasterization");
+    std::visit([&](auto& image) {
+        using Pixel = std::remove_reference_t<decltype(image.view().at(0,0))>;
+        using Component = std::remove_reference_t<decltype(Pixel{}.bgr[0])>;
+        constexpr auto maximum = std::numeric_limits<Component>::max();
+        std::vector<float> values(source.planes.size());
+        for (std::size_t index = 0; index < source.cells.elements(); ++index) {
+            if (!boxes[index]) continue;
+            const auto row = index / source.cells.cols,col = index % source.cells.cols;
+            bool finite = true;
+            for (std::size_t plane = 0; plane < values.size(); ++plane) {
+                values[plane] = source.planes[plane].at(row,col);
+                finite = finite && std::isfinite(values[plane]);
+            }
+            if (!finite) continue;
+            auto color = source.display.mapper(values,source.display.scale);
+            if (!std::isfinite(color.red) || !std::isfinite(color.green) || !std::isfinite(color.blue) ||
+                !std::isfinite(color.alpha) || color.alpha <= 0) continue;
+            color.red = std::clamp(color.red,0.0,1.0);
+            color.green = std::clamp(color.green,0.0,1.0);
+            color.blue = std::clamp(color.blue,0.0,1.0);
+            color.alpha = std::clamp(color.alpha,0.0,1.0);
+            const Pixel pixel{{static_cast<Component>(color.blue * color.alpha * maximum + 0.5),
+                               static_cast<Component>(color.green * color.alpha * maximum + 0.5),
+                               static_cast<Component>(color.red * color.alpha * maximum + 0.5)}};
+            const auto& quad = quads[index];
+            const auto& box = *boxes[index];
+            for (auto y = box.top; y < box.bottom; ++y) {
+                const double scan = double(y) + 0.5;
+                std::array<double,4> intersections{};
+                std::size_t count = 0;
+                for (std::size_t edge = 0; edge < 4; ++edge) {
+                    const auto a = quad[edge],b = quad[(edge + 1) % 4];
+                    if ((double(a.y) <= scan && scan < double(b.y)) ||
+                        (double(b.y) <= scan && scan < double(a.y)))
+                        intersections[count++] = a.x + (scan - a.y) * (double(b.x) - a.x) /
+                                                        (double(b.y) - a.y);
+                }
+                if (count < 2) continue;
+                const auto bounds = std::minmax_element(intersections.begin(),intersections.begin() + count);
+                const auto raw_first = static_cast<std::int64_t>(std::ceil(*bounds.first - 0.5));
+                const auto raw_last = static_cast<std::int64_t>(std::floor(*bounds.second - 0.5));
+                if (raw_last < static_cast<std::int64_t>(box.left) ||
+                    raw_first >= static_cast<std::int64_t>(box.right)) continue;
+                const auto first = static_cast<std::size_t>(std::max<std::int64_t>(box.left,raw_first));
+                const auto last = static_cast<std::size_t>(std::min<std::int64_t>(box.right - 1,raw_last));
+                auto output = image.values().begin() +
+                    (options.layout.top + y) * options.layout.framebuffer.cols + options.layout.left + first;
+                std::fill(output,output + last - first + 1,pixel);
+            }
+        }
+    },result.pixels);
+    context.profile().set_output(options.layout.framebuffer);
+    return result;
 }
 
 }
@@ -440,6 +628,8 @@ RasterizedFrame rasterize_swaths(std::span<const SwathRasterSource> sources,
             throw std::overflow_error("Source exceeds compact reference capacity");
         prefix.push_back(prefix.back() + count);
     }
+    if (ordered.size() == 1)
+        if (auto direct = rasterize_large_last_sample(*ordered.front(),options,context)) return std::move(*direct);
     const auto tile_cols = shape.cols / options.tile_size + (shape.cols % options.tile_size != 0);
     const auto tile_rows = shape.rows / options.tile_size + (shape.rows % options.tile_size != 0);
     const auto tile_count = Shape{tile_rows,tile_cols}.elements();
@@ -503,12 +693,17 @@ RasterizedFrame rasterize_swaths(std::span<const SwathRasterSource> sources,
                 else std::sort(candidates.begin(),candidates.end(),std::greater<>{});
                 const auto left = tile % tile_cols * options.tile_size, top = tile / tile_cols * options.tile_size;
                 const auto width = std::min(options.tile_size,shape.cols - left), height = std::min(options.tile_size,shape.rows - top);
+                auto tile_memory = context.profile().reserve(BufferKind::worker_tiles,
+                    width * height * sizeof(PixelWork) + ordered.front()->plane_count * sizeof(float));
+                std::vector<PixelWork> pixels(width * height);
+                std::vector<float> values;
                 TrackedMemory tracked(context.profile());
                 std::pmr::unsynchronized_pool_resource pool(&tracked);
-                std::pmr::vector<PixelWork> pixels(&pool);
-                pixels.reserve(width * height);
-                for (std::size_t i = 0; i < width * height; ++i) pixels.emplace_back(&pool);
-                std::pmr::vector<float> values(&pool);
+                std::pmr::vector<ExactState> exact(&pool);
+                if (options.exact_coverage) {
+                    exact.reserve(width * height);
+                    for (std::size_t i = 0; i < width * height; ++i) exact.emplace_back(&pool);
+                }
                 for (auto key : candidates) {
                     const auto global = reference_index(key,options.overlap);
                     const auto found = std::upper_bound(prefix.begin(),prefix.end(),global);
@@ -534,9 +729,12 @@ RasterizedFrame rasterize_swaths(std::span<const SwathRasterSource> sources,
                     color.alpha = std::clamp(color.alpha,0.0,1.0);
                     const auto quad = quad_at(view,cell.index);
                     const auto box = extent(view,cell.index,shape).value();
+                    if (exact.empty() && contribute_centers(pixels,quad,box,left,top,width,height,color)) continue;
                     for (auto y = std::max(top,box.top); y < std::min(top + height,box.bottom); ++y)
                         for (auto x = std::max(left,box.left); x < std::min(left + width,box.right); ++x)
-                            contribute(pixels[(y - top) * width + x - left],quad,x,y,color,&pool);
+                            if (const auto pixel = (y - top) * width + x - left; exact.empty())
+                                contribute(pixels[pixel],quad,x,y,color);
+                            else contribute_exact(pixels[pixel],exact[pixel],quad,x,y,color,&pool);
                 }
                 std::visit([&](auto& image) {
                     using Component = std::remove_reference_t<decltype(image.view().at(0,0).bgr[0])>;
@@ -545,9 +743,9 @@ RasterizedFrame rasterize_swaths(std::span<const SwathRasterSource> sources,
                         for (std::size_t col = 0; col < width; ++col) {
                             const auto& pixel = pixels[row * width + col];
                             auto& output = image.view().at(options.layout.top + top + row,options.layout.left + left + col);
-                            output.bgr = {static_cast<Component>(std::lround(std::clamp(pixel.sum.blue,0.0,1.0) * maximum)),
-                                          static_cast<Component>(std::lround(std::clamp(pixel.sum.green,0.0,1.0) * maximum)),
-                                          static_cast<Component>(std::lround(std::clamp(pixel.sum.red,0.0,1.0) * maximum))};
+                            output.bgr = {static_cast<Component>(std::clamp(pixel.sum.blue,0.0,1.0) * maximum + 0.5),
+                                          static_cast<Component>(std::clamp(pixel.sum.green,0.0,1.0) * maximum + 0.5),
+                                          static_cast<Component>(std::clamp(pixel.sum.red,0.0,1.0) * maximum + 0.5)};
                             if (result.coverage) result.coverage->view().at(top + row,left + col) =
                                 static_cast<float>(std::clamp(pixel.coverage,0.0,1.0));
                         }
