@@ -40,6 +40,15 @@ FY3 MERSI 的 `EC` 可用 1KM 文件作为主数据，并通过 `--aux` 附加�
   -o output/ec_250m.png
 ```
 
+`ECT` 为月光夜景试验模式：按 10.8 μm 亮温在 Oklab 插值的 9 节点色带上取色，保留 EC 的
+太阳阴影；低云/雾与薄卷云只旋转色相、等亮度混合，因此亮度仍然只对应温度。雾判据只在
+太阳天顶角大于约 90° 时生效，卷云判据只在 FY-3D、FY-3E 上启用。
+
+```bash
+./cmake-build-release/pg_EV_image render \
+  -m ECT -d 数据.HDF -g 定位.HDF -o output/moon.png
+```
+
 指定区域和正交投影：
 
 ```bash
@@ -88,7 +97,7 @@ FY4 经纬网需要圆盘导航，正交投影当前仍用于 MERSI 地图流程
 
 ## 现有产品
 
-MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`EK`、`TSG`。
+MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`ECT`、`EK`、`TSG`。
 FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
 GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
 

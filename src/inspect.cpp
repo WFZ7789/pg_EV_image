@@ -14,7 +14,7 @@ void inspect(const std::filesystem::path& data) {
               << "Alias: " << summary.alias << '\n'
               << "Data: " << data << '\n';
     if (summary.sensor.find("MERSI") != std::string::npos)
-        std::cout << "Modes: E R LL RT RY RF RMUL EC EK TSG (实际支持情况依卫星和分辨率而定)\n";
+        std::cout << "Modes: E R LL RT RY RF RMUL EC ECT EK TSG (实际支持情况依卫星和分辨率而定)\n";
     else if (summary.sensor.find("MWRI") != std::string::npos)
         std::cout << "Modes: S W W84 TCX TCN TCN2 TCS TCR (依卫星和通道而定)\n";
     else if (summary.sensor.find("PMR") != std::string::npos)
