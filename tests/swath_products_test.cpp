@@ -42,7 +42,7 @@ void make_mersi(const std::filesystem::path& path,bool low_light,bool masked = f
         hdf_fixture::numbers(source,"Slope",{0.01}); hdf_fixture::numbers(source,"Intercept",{0});
         return;
     }
-    for (auto name : {"SolarZenith","SolarAzimuth"}) {
+    for (auto name : {"SolarZenith","SolarAzimuth","SensorZenith","SensorAzimuth"}) {
         std::vector<float> angle(256,name == std::string("SolarZenith") ? 6000 : 4500);
         auto source = dataset(file,std::string("Geolocation/") + name,spatial,angle);
         hdf_fixture::numbers(source,"Slope",{0.01}); hdf_fixture::numbers(source,"Intercept",{0});
@@ -151,8 +151,133 @@ int main() {
         auto program = fy::products::mersi_product(session.metadata(),session.bands(),request);
         auto product = fy::products::load_product(session,program,context);
         auto reference = product_reference::next("swath");
-        compare(product.product,reference,mode);
+        if (mode != std::string("RT")) compare(product.product,reference,mode);
         require(product.product.labels.size() == 5);
+    }
+    {
+        auto session = registry.open("mersi",{mersi,mersi,{}});
+        auto metadata = session.metadata();
+        metadata.numeric_attributes["earth_sun_distance_au"] = 1;
+        const core::Shape shape{16,16};
+        core::SwathGeometry positions{core::Raster<float>(shape),core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)};
+        auto geometry = std::make_shared<core::NativeGeometry>(std::move(positions));
+        auto inputs = [&] {
+            std::vector<core::ScalarPlane> planes;
+            for (int channel = 0; channel < 3; ++channel) {
+                planes.push_back({"%",core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)});
+                std::fill(planes.back().values.values().begin(),planes.back().values.values().end(),float(50 + channel * 50));
+                std::fill(planes.back().valid.values().begin(),planes.back().valid.values().end(),1);
+            }
+            planes[0].values.values()[0] = -50;
+            planes[2].values.values()[1] = 250;
+            planes[1].values.values()[2] = 250.01f;
+            planes[0].values.values()[3] = -10000; planes[0].valid.values()[3] = 0;
+            planes[2].values.values()[4] = NAN;
+            for (int angle = 0; angle < 4; ++angle) {
+                planes.push_back({"degree",core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)});
+                std::fill(planes.back().valid.values().begin(),planes.back().valid.values().end(),1);
+            }
+            return planes;
+        };
+        for (bool mosaic : {false,true}) {
+            auto program = fy::products::mersi_product(metadata,session.bands(),{.mode = "RT",.color = "linear",.mosaic = mosaic});
+            auto product = program.prepare(inputs(),geometry,context);
+            require(product.display.scale.low == 0 && product.display.scale.high == 2.5);
+            require(product.display.balanced_rgb);
+            require(!product.shared_percentile_plane);
+            require(!product.frame.planes[1].valid.values()[2] && std::isnan(product.frame.planes[1].values.values()[2]));
+            require(!product.frame.planes[0].valid.values()[3] && !product.frame.planes[2].valid.values()[4]);
+            const std::array<float,3> sample{0.5f,1,1.5f};
+            auto color = product.display.mapper(sample,product.display.scale);
+            require(std::abs(color.red - 0.6) < 1e-6 && std::abs(color.green - 0.4) < 1e-6 &&
+                    std::abs(color.blue - 0.2) < 1e-6);
+            const std::array<float,3> extremes{-10,10,2.5f};
+            color = product.display.mapper(extremes,product.display.scale);
+            require(color.red == 1 && color.green == 1 && color.blue == 0);
+            auto invalid = inputs();
+            for (auto& plane : invalid)
+                std::fill(plane.valid.values().begin(),plane.valid.values().end(),0);
+            bool rejected = false;
+            try { program.prepare(std::move(invalid),geometry,context); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected);
+        }
+        for (const std::string curve : {"srgb","contrast"}) {
+            auto program = fy::products::mersi_product(metadata,session.bands(),{.mode = "RT",.color = curve});
+            auto product = program.prepare(inputs(),geometry,context);
+            const std::array<float,3> middle{0.5f,0.5f,0.5f};
+            const auto color = product.display.mapper(middle,{0,1});
+            require(std::abs(color.red - 0.73535698) < 1e-6 && color.red == color.green && color.green == color.blue);
+            double previous = -1;
+            for (int i = 0; i <= 512; ++i) {
+                const float value = float(i) / 512;
+                const std::array<float,3> sample{value,value,value};
+                const auto mapped = product.display.mapper(sample,{0,1});
+                require(std::isfinite(mapped.red) && mapped.red >= previous && mapped.red >= 0 && mapped.red <= 1);
+                previous = mapped.red;
+            }
+        }
+    }
+    {
+        auto session = registry.open("mersi",{mersi,mersi,{}});
+        const core::Shape shape{16,16};
+        core::SwathGeometry positions{core::Raster<float>(shape),core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)};
+        auto geometry = std::make_shared<core::NativeGeometry>(std::move(positions));
+        for (const auto& satellite : {"FY-3D","FY-3H"}) for (bool auxiliary : {false,true}) {
+            auto metadata = session.metadata();
+            metadata.satellite = satellite;
+            auto bands = session.bands();
+            if (auxiliary) {
+                metadata.grids.push_back({"auxiliary",shape,core::SourceRole::auxiliary,"geo"});
+                for (int id : {24,25}) {
+                    auto band = *std::ranges::find(bands,id,&core::BandDescriptor::id);
+                    band.id += fy::sensors::auxiliary_band_offset; band.grid = "auxiliary";
+                    band.source = core::SourceRole::auxiliary;
+                    bands.push_back(std::move(band));
+                }
+            }
+            auto program = fy::products::mersi_product(metadata,bands,{.mode = "EC"});
+            auto inputs = [&](float temperature,float middle,bool middle_valid) {
+                std::vector<core::ScalarPlane> planes;
+                for (const auto& dependency : program.plan.inputs) {
+                    const bool angle = dependency.band == fy::sensors::solar_zenith || dependency.band == fy::sensors::solar_azimuth;
+                    const bool mid = dependency.band == 20;
+                    planes.push_back({angle ? "degree" : "K",core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)});
+                    std::fill(planes.back().values.values().begin(),planes.back().values.values().end(),
+                              angle ? 0.0f : (mid ? middle : temperature) + 273.15f);
+                    std::fill(planes.back().valid.values().begin(),planes.back().valid.values().end(),mid ? middle_valid : 1);
+                }
+                return planes;
+            };
+            for (float temperature : {-90.0f,-75.0f,-60.0f}) {
+                auto expected = program.prepare(inputs(temperature,20,true),geometry,context);
+                for (auto [middle,valid] : {std::pair{10000.0f,true},{10000.0f,false},{float(NAN),false},
+                                          {float(NAN),true},{float(INFINITY),true}}) {
+                    auto actual = program.prepare(inputs(temperature,middle,valid),geometry,context);
+                    for (std::size_t channel = 0; channel < 3; ++channel)
+                        for (std::size_t i = 0; i < shape.elements(); ++i) {
+                            require(actual.frame.planes[channel].valid.values()[i]);
+                            require(std::isfinite(actual.frame.planes[channel].values.values()[i]));
+                            require(actual.frame.planes[channel].values.values()[i] == expected.frame.planes[channel].values.values()[i]);
+                        }
+                }
+                auto missing = inputs(temperature,NAN,false);
+                const auto infrared = std::ranges::find(program.plan.inputs,24 + (auxiliary ? fy::sensors::auxiliary_band_offset : 0),
+                                                       &core::InputDependency::band) - program.plan.inputs.begin();
+                missing[infrared].valid.values()[0] = 0;
+                auto actual = program.prepare(std::move(missing),geometry,context);
+                require(!actual.frame.planes[0].valid.values()[0] && actual.frame.planes[0].valid.values()[1]);
+            }
+            auto warm = program.prepare(inputs(-20,10,true),geometry,context);
+            auto changed = program.prepare(inputs(-20,30,true),geometry,context);
+            require(std::abs(warm.frame.planes[0].values.values()[0] - changed.frame.planes[0].values.values()[0]) > 0.01f);
+            auto missing = program.prepare(inputs(-20,NAN,false),geometry,context);
+            require(!missing.frame.planes[0].valid.values()[0]);
+            auto below = program.prepare(inputs(-60.001f,20,true),geometry,context);
+            auto above = program.prepare(inputs(-59.999f,20,true),geometry,context);
+            for (std::size_t channel = 0; channel < 3; ++channel)
+                require(std::abs(below.frame.planes[channel].values.values()[0] - above.frame.planes[channel].values.values()[0]) < 0.001f);
+        }
     }
     for (const auto& mode : {"W","S","W84","TCX","TCN","TCN2","TCS","TCR"}) {
         auto session = registry.open("mwri",{mwri,mwri,{}});

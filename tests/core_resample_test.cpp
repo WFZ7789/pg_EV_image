@@ -64,6 +64,10 @@ int main() {
     auto crossing = resample_geolocation(geo, {0,0,{2,2}}, {2,2}, {0,0,{8,8}}, {8,8}, context);
     crossing.validate();
     for (float longitude : crossing.longitude.values()) require(std::abs(longitude) > 178);
+    Raster<float> azimuth({2,2},{359,1,359,1});
+    auto north = resample_cubic(azimuth.view(),geo.valid.view(),{0,0,{2,2}},{2,2},
+                                {0,0,{8,8}},{8,8},true,context);
+    for (float angle : north.values.values()) require(std::abs(angle) < 2);
     bool rejected = false;
     try {
         resample_cubic(values.view().window({0,0,{1,1}}), valid.view().window({0,0,{1,1}}),

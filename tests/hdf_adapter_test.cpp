@@ -60,6 +60,12 @@ void mersi_file(const std::filesystem::path& path, bool quarter, bool malformed 
         std::vector<float> angle(rows * cols, 6000);
         auto solar = dataset(file, "Geolocation/SolarZenith", angle_dimensions, angle);
         numbers(solar, "Slope", {0.01}); numbers(solar, "Intercept", {0});
+        for (const auto name : {"SensorZenith","SensorAzimuth"}) {
+            std::vector<float> angles(rows * cols,name == std::string("SensorZenith") ? 4500 : 35900);
+            angles.back() = 65535;
+            auto sensor = dataset(file,std::string("Geolocation/") + name,angle_dimensions,angles);
+            numbers(sensor,"Slope",{0.01}); numbers(sensor,"Intercept",{0}); numbers(sensor,"FillValue",{65535});
+        }
     }
 }
 
@@ -138,6 +144,13 @@ int main() {
         auto solar = session.read_window(fy::sensors::solar_zenith, {0, 0, {1, 1}});
         calibrate(solar, band(fy::sensors::solar_zenith).calibration, context);
         require(solar.values.values()[0] == 60);
+        for (const auto id : {fy::sensors::satellite_zenith,fy::sensors::satellite_azimuth}) {
+            auto sensor = session.read_window(id,{0,0,{3,5}});
+            calibrate(sensor,band(id).calibration,context);
+            require(band(id).calibrated_unit == "degree");
+            require(sensor.values.values()[0] == (id == fy::sensors::satellite_zenith ? 45 : 359));
+            require(!sensor.valid.values().back() && std::isnan(sensor.values.values().back()));
+        }
         auto geo = session.read_geometry("geo", {0, 0, {3, 5}});
         require(std::get<SwathGeometry>(geo).valid.view().at(0, 1) == 0);
         require(std::get<SwathGeometry>(geo).latitude.view().at(0, 1) == -9999.9f);

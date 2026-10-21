@@ -212,6 +212,10 @@ void save_frame(RasterizedFrame& rendered,const MapPlan& map,const products::Pre
         using Pixel = std::remove_reference_t<decltype(pixels.view().at(0,0))>;
         return cv::Mat(int(pixels.shape().rows),int(pixels.shape().cols),std::is_same_v<Pixel,Pixel8> ? CV_8UC3 : CV_16UC3,pixels.values().data());
     },rendered.pixels);
+    if (product.display.balanced_rgb) {
+        const auto gains = product.display.scale.rgb_gain;
+        std::cout << "白平衡 RGB 增益 " << gains[0] << ' ' << gains[1] << ' ' << gains[2] << '\n';
+    }
     {
         auto phase = context.profile().phase("annotations");
         grid(canvas,map.view,map.layout,request,context.profile(),map.disk ? &*map.disk : nullptr);

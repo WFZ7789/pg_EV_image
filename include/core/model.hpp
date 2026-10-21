@@ -171,6 +171,8 @@ struct InputDependency {
     bool complete_scene_parameters = false;
     /// @brief 显式使用原始样本，仍执行有效性检查。
     bool raw_samples = false;
+    /// @brief 以 360 度周期插值方位角。
+    bool cyclic_degrees = false;
 };
 
 struct FramePlan {
@@ -195,6 +197,7 @@ struct ProductPlan {
 struct DisplayScale {
     double low = 0;
     double high = 1;
+    std::array<double,3> rgb_gain{1,1,1};
 };
 
 struct Color {
@@ -211,6 +214,7 @@ struct DisplayDescriptor {
     ColorSpace color_space = ColorSpace::display_encoded;
     bool colorbar = false;
     std::function<Color(std::span<const float>, const DisplayScale&)> mapper;
+    bool balanced_rgb = false;
 };
 
 struct LayoutDescriptor {

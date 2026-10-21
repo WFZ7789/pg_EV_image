@@ -11,6 +11,7 @@ inline constexpr int solar_zenith = -1001;
 inline constexpr int solar_azimuth = -1002;
 inline constexpr int low_light = -1003;
 inline constexpr int satellite_zenith = -1004;
+inline constexpr int satellite_azimuth = -1005;
 inline constexpr int auxiliary_band_offset = 1000;
 inline constexpr int sounding_band_offset = 100;
 inline constexpr int giirs_lw_offset = 10000;

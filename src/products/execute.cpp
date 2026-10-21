@@ -136,7 +136,7 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
             auto source_memory = context.profile().reserve(BufferKind::scene,storage_bytes(input_window.shape,5));
             auto source = load_plane(session,*found,input_window,context,invalid,dependency.raw_samples);
             auto plane = resample_cubic(source.values.view(),source.valid.view(),input_window,band_shape,
-                                        input_target,input_shape,false,context,invalid);
+                                        input_target,input_shape,dependency.cyclic_degrees,context,invalid);
             plane.unit = found->calibrated_unit;
             inputs.push_back(std::move(plane));
         }

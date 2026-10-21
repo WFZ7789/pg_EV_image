@@ -241,6 +241,8 @@ public:
             }
             add_angle(solar_zenith, "Geolocation/SolarZenith");
             add_angle(solar_azimuth, "Geolocation/SolarAzimuth");
+            add_angle(satellite_zenith, "Geolocation/SensorZenith");
+            add_angle(satellite_azimuth, "Geolocation/SensorAzimuth");
         } else if (kind == "fy4") {
             std::smatch resolution;
             if (!std::regex_search(alias,resolution,std::regex(R"(([0-9]{4}M))")))

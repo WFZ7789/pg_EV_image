@@ -156,12 +156,31 @@ def main():
             values = []
             factor = f32(1 / f32(math.cos(math.radians(30))))
             for shift in (0, 3):
-                for row in range(32):
-                    for col in range(64):
-                        raw = 10 + (row * 3 + col * 5 + channel * 7) % 80 + shift
-                        values.append(f32(f32(raw / 100) * factor))
+                for selected_channel in (range(3) if mode == "RT" else (channel,)):
+                    for row in range(32):
+                        for col in range(64):
+                            raw = 10 + (row * 3 + col * 5 + selected_channel * 7) % 80 + shift
+                            values.append(f32(f32(raw / 100) * factor))
             quantile = sorted(values)[math.ceil(len(values) * .99) - 1]
-            expected_scale = f32(math.floor(quantile * 65535 / 8) * 8 / 65535)
+            expected_scale = ([min(values), max(values)] if mode == "RT" else
+                              [0, f32(math.floor(quantile * 65535 / 8) * 8 / 65535)])
+            if mode == "RT":
+                pixels = []
+                for shift in (0, 3):
+                    for row in range(32):
+                        for col in range(64):
+                            pixel = [f32(f32((10 + (row * 3 + col * 5 + band * 7) % 80 + shift) / 100) * factor)
+                                     for band in (2, 1, 0)]
+                            strength = max(0, min(1, (1 - pixel[0]) / .8))
+                            reference_path = (.01897377346254877, .037776211251123674, .07204638290559921)
+                            pixels.append([f32(max(0, value - strength * path)) for value, path in zip(pixel, reference_path)])
+                neutral = [(int(min(4095, sum(pixel) / 3 / 2.5 * 4095)), pixel) for pixel in pixels
+                           if max(pixel) >= .2 and min(pixel) >= .8 * max(pixel)]
+                threshold = sorted(brightness for brightness, _ in neutral)[len(neutral) - math.ceil(len(neutral) / 10)]
+                sums = [sum(pixel[channel] for brightness, pixel in neutral if brightness >= threshold) for channel in range(3)]
+                gains = [min(sums) / value for value in sums]
+                balanced = [pixel[channel] * gains[channel] for pixel in pixels for channel in range(3)]
+                expected_scale = [min(balanced), max(balanced)]
             hashes = []
             for threads in (1, 4):
                 mode_output = directory / f"{mode}-{threads}.png"
@@ -169,8 +188,12 @@ def main():
                 mode_path.write_text(json.dumps(dict(job, mode=mode, band=3, output=str(mode_output))))
                 run([args.app, "mosaic", "--job", mode_path, "--threads", threads, "--profile", "--scratch-dir", scratch])
                 profile = json.loads(Path(str(mode_output) + ".profile.json").read_text())
-                check(profile["shared_display_scale"] == [0, expected_scale], "Shared histogram rank or domain changed")
-                check(profile["phases"]["product"]["calls"] == 2 and profile["phases"]["read"]["calls"] == (4 if mode == "RMUL" else 8),
+                check(all(abs(a - b) < 1e-6 for a, b in zip(profile["shared_display_scale"], expected_scale)),
+                      "Shared reflection range or domain changed")
+                if mode == "RT":
+                    check(profile["phases"]["white_balance"]["calls"] == 1, "Mosaic white balance must be shared before min/max")
+                    check(profile["phases"]["rayleigh"]["calls"] == 2, "Each scene must receive Rayleigh correction before shared statistics")
+                check(profile["phases"]["product"]["calls"] == 2 and profile["phases"]["read"]["calls"] == (4 if mode == "RMUL" else 14 if mode == "RT" else 8),
                       "Mosaic repeated its product calculation or source reads")
                 hashes.append(digest(mode_output))
             check(hashes[0] == hashes[1], "Thread count changed shared-stretch output")
@@ -178,7 +201,7 @@ def main():
         run([args.fixture, saturated, "saturated"])
         saturated_output = directory / "saturated.png"
         saturated_path = directory / "saturated.json"
-        saturated_path.write_text(json.dumps(dict(job, mode="RT", band=3, output=str(saturated_output),
+        saturated_path.write_text(json.dumps(dict(job, mode="RY", band=3, output=str(saturated_output),
             inputs=[{"data": str(path), "geo": str(path)} for path in sorted(saturated.glob("*.HDF"))])))
         run([args.app, "mosaic", "--job", saturated_path, "--profile", "--scratch-dir", scratch], expected=2)
         failed = json.loads(Path(str(saturated_output) + ".profile.json").read_text())

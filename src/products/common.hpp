@@ -107,7 +107,7 @@ inline std::vector<std::string> labels(const SensorMetadata& metadata, const std
 }
 
 inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zenith, const ScalarPlane& azimuth,
-                    ExecutionContext& context) {
+                    ExecutionContext& context, int pixel_distance = 1) {
     const auto shape = temperature.values.shape();
     double average_zenith = 0, average_azimuth = 0, count = 0;
     for (std::size_t i = 0; i < shape.elements(); ++i)
@@ -130,7 +130,8 @@ inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zen
                 float sum = 0;
                 bool valid = temperature.valid.values()[index];
                 for (int scale = 1; scale <= offset && count; ++scale) {
-                    const int dx = static_cast<int>(std::cos(angle) * scale), dy = static_cast<int>(std::sin(angle) * scale);
+                    const int dx = static_cast<int>(std::cos(angle) * scale * pixel_distance);
+                    const int dy = static_cast<int>(std::sin(angle) * scale * pixel_distance);
                     const auto r = static_cast<std::int64_t>(row) + dy, c = static_cast<std::int64_t>(col) + dx;
                     float shifted = 0;
                     if (r >= 0 && c >= 0 && r < static_cast<std::int64_t>(shape.rows) && c < static_cast<std::int64_t>(shape.cols)) {

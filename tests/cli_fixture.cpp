@@ -65,9 +65,9 @@ void scene(const std::filesystem::path& path, const std::string& time, float shi
         auto dataset = file.createDataSet(name, H5::PredType::NATIVE_FLOAT, H5::DataSpace(2, dimensions + 1));
         dataset.write(data, H5::PredType::NATIVE_FLOAT);
     }
-    {
-        auto dataset = file.createDataSet("Geolocation/SolarZenith",H5::PredType::NATIVE_FLOAT,H5::DataSpace(2,dimensions + 1));
-        std::vector<float> angles(rows * cols,3000);
+    for (const auto name : {"SolarZenith","SolarAzimuth","SensorZenith","SensorAzimuth"}) {
+        auto dataset = file.createDataSet(std::string("Geolocation/") + name,H5::PredType::NATIVE_FLOAT,H5::DataSpace(2,dimensions + 1));
+        std::vector<float> angles(rows * cols,name == std::string("SolarZenith") ? 3000 : 0);
         dataset.write(angles.data(),H5::PredType::NATIVE_FLOAT);
         scalar_attribute(dataset,"Slope",.01f); scalar_attribute(dataset,"Intercept",0);
     }

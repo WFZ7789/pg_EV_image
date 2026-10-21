@@ -117,16 +117,57 @@ int main() {
         input.frame.planes.push_back({"1",Raster<float>({1,100}),Raster<std::uint8_t>({1,100})});
         input.shared_percentile_plane = 0;
         for (std::size_t i = 0; i < 100; ++i) input.frame.planes[0].values.values()[i] = float(i) / 100;
-        SharedDisplayStatistics histogram("RT",context.profile()); histogram.add(input);
+        SharedDisplayStatistics histogram("RY",context.profile()); histogram.add(input);
         const auto scale = histogram.scale();
         require(scale && scale->low == 0 && scale->high <= 0.98 && 0.98 - scale->high < 8.0 / 65535);
-        SharedDisplayStatistics outside("RT",context.profile());
+        SharedDisplayStatistics outside("RY",context.profile());
         std::fill(input.frame.planes[0].values.values().begin(),input.frame.planes[0].values.values().end(),8);
         outside.add(input); rejects([&] { outside.scale(); });
         input.frame.planes[0].values.values()[0] = -120;
         input.frame.planes[0].values.values()[1] = 80;
         SharedDisplayStatistics extrema("E",context.profile()); extrema.add(input);
         require(extrema.scale()->low == -105 && extrema.scale()->high == 40);
+    }
+    {
+        PreparedProduct first,second;
+        for (auto* product : {&first,&second})
+            for (int channel = 0; channel < 3; ++channel)
+                product->frame.planes.push_back({"1",Raster<float>({1,3},{0.2f,0.5f,0.8f}),
+                                                Raster<std::uint8_t>({1,3},{1,1,1})});
+        first.frame.planes[1].values.values()[0] = -0.5f;
+        first.frame.planes[2].values.values()[2] = 1.5f;
+        second.frame.planes[2].values.values()[2] = 2.5f;
+        second.frame.planes[0].values.values()[1] = 100;
+        second.frame.planes[1].values.values()[0] = -100;
+        second.frame.planes[1].valid.values()[0] = 0;
+        SharedDisplayStatistics shared("RT",context.profile());
+        shared.add(first); shared.add(second);
+        require(shared.scale()->low == -0.5 && shared.scale()->high == 2.5);
+        SharedDisplayStatistics reversed("RT",context.profile());
+        reversed.add(second); reversed.add(first);
+        require(reversed.scale()->low == shared.scale()->low && reversed.scale()->high == shared.scale()->high);
+        for (auto& plane : first.frame.planes)
+            std::fill(plane.values.values().begin(),plane.values.values().end(),0.5f);
+        SharedDisplayStatistics constant("RT",context.profile()); constant.add(first);
+        require(constant.scale()->low == 0.5 && constant.scale()->high == 1.5);
+        for (auto& plane : first.frame.planes)
+            std::fill(plane.valid.values().begin(),plane.valid.values().end(),0);
+        SharedDisplayStatistics empty("RT",context.profile()); empty.add(first);
+        rejects([&] { empty.scale(); });
+    }
+    {
+        PreparedProduct input;
+        input.frame.planes.push_back({"1",Raster<float>({1,3},{0.05f,0.8f,0.8f}),Raster<std::uint8_t>({1,3},{1,1,1})});
+        input.frame.planes.push_back({"1",Raster<float>({1,3},{0.1f,0.7f,0.7f}),Raster<std::uint8_t>({1,3},{1,1,1})});
+        input.frame.planes.push_back({"1",Raster<float>({1,3},{0.15f,0.75f,0.75f}),Raster<std::uint8_t>({1,3},{1,1,1})});
+        SharedDisplayStatistics statistics("RT",context.profile()); statistics.add(input);
+        const auto scale = *statistics.scale();
+        require(std::abs(scale.rgb_gain[0] - 0.7 / 0.75) < 1e-6 && scale.rgb_gain[1] == 1 &&
+                std::abs(scale.rgb_gain[2] - 0.7 / 0.8) < 1e-6);
+        require(std::abs(scale.low - 0.04375) < 1e-6 && std::abs(scale.high - 0.7) < 1e-6);
+        const std::array<double,3> cloud{0.75,0.7,0.8};
+        for (std::size_t channel = 0; channel < 3; ++channel)
+            require(std::abs((cloud[channel] * scale.rgb_gain[channel] - scale.low) / (scale.high - scale.low) - 1) < 1e-6);
     }
     const auto report = context.profile().snapshot();
     require(report.cache && report.cache->scenes == 1 && report.cache->read_bytes > 0 && report.cache->write_bytes > 0 && !report.cache->current_bytes);
