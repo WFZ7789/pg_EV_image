@@ -303,30 +303,31 @@ void contribute(PixelWork& pixel,const Quad& quad,std::size_t x,std::size_t y,Co
     accumulate(area(inside));
 }
 
-bool contribute_centers(std::span<PixelWork> pixels,const Quad& quad,const Extent& box,
+bool contribute_scanline(std::span<PixelWork> pixels,const Quad& quad,const Extent& box,
                         std::size_t left,std::size_t top,std::size_t width,std::size_t height,Color color) {
     if (std::abs(signed_area(quad)) < 16) return false;
+    const double orientation = signed_area(quad) > 0 ? 1 : -1;
+    std::array<std::array<double,3>,4> edges;
+    for (std::size_t edge = 0; edge < 4; ++edge) {
+        const auto a = quad[edge],b = quad[(edge + 1) % 4];
+        const double dx = (double(b.x) - a.x) * orientation,dy = (double(b.y) - a.y) * orientation;
+        edges[edge] = {-dy,dx,dy * a.x - dx * a.y + std::min(0.0,dx) + std::min(0.0,-dy)};
+    }
     const auto first_y = std::max(top,box.top),last_y = std::min(top + height,box.bottom);
+    const auto first_x = std::max(left,box.left),last_x = std::min(left + width,box.right);
     for (auto y = first_y; y < last_y; ++y) {
-        const double scan = double(y) + 0.5;
-        std::array<double,4> intersections{};
-        std::size_t count = 0;
-        for (std::size_t edge = 0; edge < 4; ++edge) {
-            const auto a = quad[edge],b = quad[(edge + 1) % 4];
-            if ((double(a.y) <= scan && scan < double(b.y)) || (double(b.y) <= scan && scan < double(a.y)))
-                intersections[count++] = a.x + (scan - a.y) * (double(b.x) - a.x) / (double(b.y) - a.y);
+        double full_first = first_x,full_last = double(last_x) - 1;
+        for (const auto& edge : edges) {
+            const double constant = edge[1] * y + edge[2];
+            if (edge[0] > 0) full_first = std::max(full_first,std::ceil(-constant / edge[0]));
+            else if (edge[0] < 0) full_last = std::min(full_last,std::floor(-constant / edge[0]));
+            else if (constant < 0) { full_first = last_x; break; }
         }
-        if (count < 2) continue;
-        const auto bounds = std::minmax_element(intersections.begin(),intersections.begin() + count);
-        const auto raw_first = static_cast<std::int64_t>(std::ceil(*bounds.first - 0.5));
-        const auto raw_last = static_cast<std::int64_t>(std::floor(*bounds.second - 0.5));
-        const auto first_x = static_cast<std::size_t>(std::max<std::int64_t>(left,raw_first));
-        const auto last_x = static_cast<std::size_t>(std::min<std::int64_t>(left + width - 1,raw_last));
-        if (raw_last < static_cast<std::int64_t>(left) || raw_first >= static_cast<std::int64_t>(left + width) || first_x > last_x)
-            continue;
-        for (auto x = first_x; x <= last_x; ++x) {
+        for (auto x = first_x; x < last_x; ++x) {
             auto& pixel = pixels[(y - top) * width + x - left];
-            if (pixel.coverage <= 0) {
+            if (double(x) < full_first || double(x) > full_last) {
+                contribute(pixel,quad,x,y,color);
+            } else if (pixel.coverage <= 0) {
                 pixel.coverage = 1;
                 pixel.sum.red = color.alpha * color.red;
                 pixel.sum.green = color.alpha * color.green;
@@ -729,7 +730,7 @@ RasterizedFrame rasterize_swaths(std::span<const SwathRasterSource> sources,
                     color.alpha = std::clamp(color.alpha,0.0,1.0);
                     const auto quad = quad_at(view,cell.index);
                     const auto box = extent(view,cell.index,shape).value();
-                    if (exact.empty() && contribute_centers(pixels,quad,box,left,top,width,height,color)) continue;
+                    if (exact.empty() && contribute_scanline(pixels,quad,box,left,top,width,height,color)) continue;
                     for (auto y = std::max(top,box.top); y < std::min(top + height,box.bottom); ++y)
                         for (auto x = std::max(left,box.left); x < std::min(left + width,box.right); ++x)
                             if (const auto pixel = (y - top) * width + x - left; exact.empty())

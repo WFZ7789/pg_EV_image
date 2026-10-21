@@ -184,6 +184,39 @@ int main() {
         require(!result.coverage);
     }
     {
+        auto large = quad({PixelPoint{0.2f,0.3f},{9.6f,1.4f},{10.4f,10.1f},{0.9f,9.4f}},{1,1,1});
+        const std::vector<SwathRasterSource> sources{large.view()};
+        auto reference = rasterize_swaths(sources,options({12,12},16),context);
+        for (std::size_t tile : {3,64}) {
+            auto configured = options({12,12},16,tile);
+            configured.exact_coverage = false;
+            auto result = rasterize_swaths(sources,configured,context);
+            for (std::size_t i = 0; i < 144; ++i) {
+                require(std::abs(result.coverage->values()[i] - reference.coverage->values()[i]) < 1e-6);
+                require(std::get<Raster<Pixel16>>(result.pixels).values()[i].bgr ==
+                        std::get<Raster<Pixel16>>(reference.pixels).values()[i].bgr);
+            }
+        }
+    }
+    {
+        OwnedSource mixed{Raster<PixelPoint>({4,4}),Raster<float>({3,3}),Raster<std::uint8_t>({3,3}),{1,1,1}};
+        const std::array<float,4> x{-0.2f,3.7f,7.8f,12.2f},y{-0.1f,4,7.9f,12.1f};
+        for (std::size_t row = 0; row < 4; ++row)
+            for (std::size_t col = 0; col < 4; ++col) mixed.vertices.view().at(row,col) = {x[col],y[row]};
+        std::fill(mixed.valid.values().begin(),mixed.valid.values().end(),1);
+        const std::vector<SwathRasterSource> sources{mixed.view()};
+        for (std::size_t tile : {3,64}) {
+            auto configured = options({12,12},16,tile);
+            configured.exact_coverage = false;
+            auto result = rasterize_swaths(sources,configured,context);
+            for (std::size_t i = 0; i < 144; ++i) {
+                require(std::abs(result.coverage->values()[i] - 1) < 1e-6);
+                require(std::get<Raster<Pixel16>>(result.pixels).values()[i].bgr ==
+                        std::array<std::uint16_t,3>{65535,65535,65535});
+            }
+        }
+    }
+    {
         OwnedSource dense{Raster<PixelPoint>({129,129}),Raster<float>({128,128}),Raster<std::uint8_t>({128,128}),{1,1,1}};
         for (std::size_t row = 0; row <= 128; ++row)
             for (std::size_t col = 0; col <= 128; ++col)
