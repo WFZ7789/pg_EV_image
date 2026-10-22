@@ -58,7 +58,7 @@ Window select_region(const SwathGeometry& geometry,const GeographicRegion& regio
                 last_row = std::max(last_row,row); last_col = std::max(last_col,col);
             }
         }
-    if (first_row == shape.rows) throw std::invalid_argument("Requested region is outside the input coverage");
+    if (first_row == shape.rows) throw RegionOutsideCoverage("Requested region is outside the input coverage");
     return {first_row,first_col,{last_row - first_row + 1,last_col - first_col + 1}};
 }
 
@@ -74,7 +74,7 @@ Raster<T> copy_window(const Raster<T>& source,Window window) {
 }
 
 LoadedProduct load_product(SensorSession& session,const ProductDefinition& definition,ExecutionContext& context,
-                                 std::optional<GeographicRegion> region) {
+                                 std::optional<GeographicRegion> region,ProductLoadCache* shared_cache) {
     const auto metadata = session.metadata();
     const auto bands = session.bands();
     definition.plan.validate(metadata,bands);
@@ -83,6 +83,18 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
     const auto& target_grid = metadata.grid(frame.grid.empty() ? definition.plan.calculation_grid : frame.grid);
     const auto source_grid = target_grid.paired_grid.empty() ? target_grid.id : target_grid.paired_grid;
     const auto source_shape = metadata.grid(source_grid).shape, full_shape = target_grid.shape;
+    ProductLoadCache local_cache;
+    auto& cache = shared_cache ? *shared_cache : local_cache;
+    const auto cached_geometry = [&](const std::string& grid) {
+        auto found = cache.geometry.find(grid);
+        if (found == cache.geometry.end()) {
+            const auto native_shape = metadata.grid(grid).shape;
+            auto value = std::make_shared<NativeGeometry>(session.read_geometry(grid,{0,0,native_shape}));
+            cache.memory.push_back(context.profile().reserve(BufferKind::scene,geometry_bytes(*value)));
+            found = cache.geometry.emplace(grid,std::move(value)).first;
+        }
+        return found->second;
+    };
     auto shape = full_shape;
     Window target_window{0,0,shape};
     auto memory = context.profile().reserve(BufferKind::scene,0);
@@ -110,14 +122,22 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
         target_window = select_region(swath,*region);
         shape = target_window.shape;
         auto cropped_memory = context.profile().reserve(BufferKind::scene,storage_bytes(shape,9));
-        geometry = std::make_shared<NativeGeometry>(SwathGeometry{copy_window(swath.latitude,target_window),
-            copy_window(swath.longitude,target_window),copy_window(swath.valid,target_window)});
+        SwathGeometry cropped{copy_window(swath.latitude,target_window),copy_window(swath.longitude,target_window),
+                              copy_window(swath.valid,target_window)};
+        if (definition.plan.clip_to_region)
+            for (std::size_t i = 0; i < shape.elements(); ++i)
+                cropped.valid.values()[i] = cropped.valid.values()[i] &&
+                    std::abs(cropped.latitude.values()[i]-region->latitude) <= region->half_range &&
+                    std::abs(std::remainder(cropped.longitude.values()[i]-region->longitude,360.)) <= region->half_range;
+        geometry = std::make_shared<NativeGeometry>(std::move(cropped));
         memory = std::move(cropped_memory);
     }
     std::uint64_t owned_bytes = geometry_bytes(*geometry);
     const auto invalid = std::ranges::any_of(definition.plan.statistics, &StatisticsSpec::include_masked_finite) ?
                          InvalidSamplePolicy::retain_finite : InvalidSamplePolicy::nan;
     std::vector<ScalarPlane> inputs;
+    std::map<std::string,Raster<GeographicWeights>> mappings;
+    std::vector<ProfileReport::BufferReservation> mapping_memory;
     for (const auto& dependency : definition.plan.inputs) {
         const auto found = std::ranges::find(bands,dependency.band,&BandDescriptor::id);
         const auto band_shape = metadata.grid(found->grid).shape;
@@ -130,7 +150,26 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
             throw std::overflow_error("Product input storage overflow");
         owned_bytes += bytes;
         memory.resize(owned_bytes);
-        if (band_shape == input_shape) inputs.push_back(load_plane(session,*found,input_target,context,invalid,dependency.raw_samples));
+        if (dependency.geographic_alignment && found->grid != dependency.target_grid) {
+            if (dependency.target_grid != target_grid.id || dependency.raw_samples)
+                throw std::invalid_argument("Geographic alignment requires a calibrated input on the frame grid");
+            auto mapping = mappings.find(found->grid);
+            if (mapping == mappings.end()) {
+                const auto source_geometry = cached_geometry(found->grid);
+                mapping_memory.push_back(context.profile().reserve(BufferKind::statistics,
+                    input_target.shape.elements()*sizeof(GeographicWeights)));
+                mapping = mappings.emplace(found->grid,geographic_weights(std::get<SwathGeometry>(*source_geometry),
+                    std::get<SwathGeometry>(*geometry),context)).first;
+            }
+            auto plane = cache.planes.find(found->id);
+            if (plane == cache.planes.end()) {
+                auto value = std::make_shared<ScalarPlane>(load_plane(session,*found,{0,0,band_shape},context,InvalidSamplePolicy::nan,false));
+                cache.memory.push_back(context.profile().reserve(BufferKind::scene,storage_bytes(band_shape,5)));
+                plane = cache.planes.emplace(found->id,std::move(value)).first;
+            }
+            inputs.push_back(resample_geographic(*plane->second,mapping->second,context));
+        }
+        else if (band_shape == input_shape) inputs.push_back(load_plane(session,*found,input_target,context,invalid,dependency.raw_samples));
         else {
             const auto input_window = cubic_source_window(band_shape,input_shape,input_target);
             auto source_memory = context.profile().reserve(BufferKind::scene,storage_bytes(input_window.shape,5));

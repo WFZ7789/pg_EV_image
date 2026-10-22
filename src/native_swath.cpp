@@ -52,10 +52,38 @@ void render_registered_scene(const Request& request,const std::string& adapter,A
     products::ProductRequest product_request;
     product_request.mode = request.mode; product_request.band = request.band; product_request.color = request.color;
     product_request.projection = {request.projection == "orthographic",request.center_lat,request.center_lon};
+    product_request.scan = request.amsr3_scan.value_or("A");
+    if (adapter == "amsr3" && product_request.scan == "AB") {
+        if (request.mode == "W") throw std::invalid_argument("AMSR3 W selects A/B through the band number");
+        products::ProductLoadCache cache;
+        std::vector<products::LoadedProduct> loaded;
+        std::uint64_t samples = 0;
+        for (const auto& scan : {"A","B"}) {
+            product_request.scan = scan;
+            const auto definition = product_registry.plan(adapter,session.metadata(),session.bands(),product_request);
+            const auto region = request.half_range ? std::optional(products::GeographicRegion{
+                request.center_lat,request.center_lon,*request.half_range}) : std::nullopt;
+            try { loaded.push_back(products::load_product(session,definition,context,region,&cache)); }
+            catch (const products::RegionOutsideCoverage&) { continue; }
+            samples += loaded.back().source_window.shape.elements();
+        }
+        if (loaded.empty()) throw products::RegionOutsideCoverage("Requested region is outside both AMSR3 scans");
+        auto& labels = loaded.front().product.labels;
+        for (auto& label : labels) {
+            const auto position = label.find("[89");
+            if (position != std::string::npos) label.replace(position,5,"[89A+B]");
+        }
+        context.profile().set_source_pixels(samples);
+        cache.planes.clear(); cache.geometry.clear(); cache.memory.clear();
+        render_swath_products(request,loaded,context,{.region_already_selected = request.half_range.has_value()});
+        return;
+    }
     const auto definition = product_registry.plan(adapter,session.metadata(),session.bands(),product_request);
     const auto region = definition.plan.regional_default_half_range ?
         std::optional(products::GeographicRegion{request.center_lat,request.center_lon,
-            request.half_range.value_or(*definition.plan.regional_default_half_range)}) : std::nullopt;
+            request.half_range.value_or(*definition.plan.regional_default_half_range)}) :
+        adapter == "amsr3" && request.half_range ? std::optional(products::GeographicRegion{
+            request.center_lat,request.center_lon,*request.half_range}) : std::nullopt;
     auto loaded = products::load_product(session,definition,context,region);
     render_product(request,loaded,context,{.bit_depth = definition.plan.frames.front().bit_depth,
                                            .region_already_selected = region.has_value()});

@@ -5,6 +5,8 @@
 oneTBB 执行上下文及性能报告。使用 `-DFY_BUILD_APP=OFF` 可仅构建核心及其测试，
 无需 HDF5、OpenCV 或 CLI11。`fy_sensors` 已提供 MERSI/MWRI、PMR、FY4 AGRI/GHI 和 GIIRS 原生窗口读取，
 核心提供双缓冲定标、定位重采样、圆盘导航，以及扫描带和规则图像网格的面积覆盖栅格器。
+AMSR3 L1B 通过独立的 `Amsr3Adapter` 接入同一注册表与 I/O 通道，直接读取 NetCDF4 的
+HDF5 数据集；产品以 `amsr3` 注册，无需 NetCDF 库。详情见 [AMSR3 支持说明](AMSR3.md)。
 `fy_products` 实现上述载荷的产品依赖与显示策略，`src/native_swath.cpp` 编排这些载荷的
 单景 `render` 和 MERSI `mosaic`。`src/render_product.cpp` 按几何能力完成投影、最终尺寸
 栅格化、版式与编码；读取和产品公式独立于这一通用入口。
@@ -78,6 +80,14 @@ RTG 在原网格完成非线性校正后再插值到辅助网格，太阳角从�
 注册读取工厂，通过 `products::ProductRegistry` 注册产品工厂。`render_registered_scene`
 使用相同键取得两个工厂，按 `ProductPlan` 读取、定标、计算，再调用 `render_product`；
 产品算法不执行文件输出。区域载荷的默认半径由产品计划声明，不由 renderer 检查载荷名称。
+
+`InputDependency::geographic_alignment` 显式声明按实际观测位置对齐，优先于数组尺寸判断。
+核心在单位球面的源网格三角形内生成权重，通过空间索引查找目标观测；不对覆盖外或无效
+三角形外推。相同源网格的多个波段复用权重，`ProductLoadCache` 在同一传感器会话内复用
+跨扫描组所需的源定位与物理数值，生命周期仅限该次任务。
+`render_swath_products` 接收多个同产品扫描带，统一地图范围并复用既有栅格重叠策略，
+不读取载荷名称。AMSR3 AB 的 A/B 选择和准备留在应用编排层，合并前不交错数组行或生成 RGB 缓存。
+扫描带地图支持最高 360° 经度跨度，跨地图切口的源单元保持已有断开规则，避免横跨整图连线。
 
 `include/render_product.hpp` 接收已准备的数值产品，按 `SwathGeometry`、`NativeDiskGeometry`
 或 `ImageGeometry` 分派，renderer/rasterizer 不判断卫星或载荷名称。

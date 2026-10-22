@@ -16,6 +16,7 @@ add_library(fy_core STATIC
         src/core/execution.cpp
         src/core/calibration.cpp
         src/core/resample.cpp
+        src/core/geographic_resample.cpp
         src/core/stream.cpp
         src/core/render.cpp
         src/core/image_render.cpp
@@ -24,7 +25,7 @@ target_include_directories(fy_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(fy_core PRIVATE TBB::tbb Threads::Threads)
 target_compile_features(fy_core PUBLIC cxx_std_23)
 
-add_library(fy_products STATIC src/products/swath.cpp src/products/rayleigh.cpp src/products/fy4.cpp src/products/fy4_day.cpp src/products/pmr.cpp src/products/giirs.cpp src/products/execute.cpp src/products/cache.cpp src/products/statistics.cpp src/products/registry.cpp)
+add_library(fy_products STATIC src/products/swath.cpp src/products/amsr3.cpp src/products/rayleigh.cpp src/products/fy4.cpp src/products/fy4_day.cpp src/products/pmr.cpp src/products/giirs.cpp src/products/execute.cpp src/products/cache.cpp src/products/statistics.cpp src/products/registry.cpp)
 target_link_libraries(fy_products PUBLIC fy_core)
 
 if(FY_BUILD_APP)
@@ -47,7 +48,7 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
-    foreach(core_test IN ITEMS core_model_test core_adapter_test core_execution_test core_resample_test core_calibration_test core_stream_test core_render_test core_image_render_test)
+    foreach(core_test IN ITEMS core_model_test core_adapter_test core_execution_test core_resample_test geographic_resample_test core_calibration_test core_stream_test core_render_test core_image_render_test)
         add_executable(${core_test} tests/${core_test}.cpp)
         target_link_libraries(${core_test} PRIVATE fy_core)
         add_test(NAME ${core_test} COMMAND ${core_test})
@@ -85,6 +86,10 @@ if(BUILD_TESTING)
         target_link_libraries(giirs_products_test PRIVATE fy_products fy_sensors ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
         target_include_directories(giirs_products_test PRIVATE ${HDF5_INCLUDE_DIRS})
         add_test(NAME giirs_products_test COMMAND giirs_products_test)
+        add_executable(amsr3_test tests/amsr3_test.cpp)
+        target_link_libraries(amsr3_test PRIVATE fy_render ${OpenCV_LIBS} ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
+        target_include_directories(amsr3_test PRIVATE ${OpenCV_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
+        add_test(NAME amsr3_test COMMAND amsr3_test)
         add_executable(new_sensor_test tests/new_sensor_test.cpp)
         target_link_libraries(new_sensor_test PRIVATE fy_render ${OpenCV_LIBS})
         target_include_directories(new_sensor_test PRIVATE ${OpenCV_INCLUDE_DIRS})
@@ -98,6 +103,10 @@ if(BUILD_TESTING)
             add_executable(cli_fixture tests/cli_fixture.cpp)
             target_include_directories(cli_fixture PRIVATE ${HDF5_INCLUDE_DIRS})
             target_link_libraries(cli_fixture PRIVATE ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
+            add_test(NAME amsr3_cli_test COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/amsr3_cli_test.py
+                    --app $<TARGET_FILE:pg_EV_image> --fixture $<TARGET_FILE:amsr3_test>)
+            set_tests_properties(amsr3_cli_test PROPERTIES TIMEOUT 120)
             add_test(NAME cli_execution_test COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_execution_test.py
                     --app $<TARGET_FILE:pg_EV_image> --fixture $<TARGET_FILE:cli_fixture>)

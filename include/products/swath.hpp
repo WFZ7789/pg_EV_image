@@ -12,6 +12,7 @@ struct ProductRequest {
     std::string color;
     core::MapProjection projection;
     bool mosaic = false;
+    std::string scan = "A";
 };
 
 struct PreparedProduct {
@@ -32,6 +33,8 @@ ProductDefinition mersi_product(const core::SensorMetadata& metadata, std::span<
                            const ProductRequest& request);
 ProductDefinition mwri_product(const core::SensorMetadata& metadata, std::span<const core::BandDescriptor> bands,
                           const ProductRequest& request);
+ProductDefinition amsr3_product(const core::SensorMetadata& metadata, std::span<const core::BandDescriptor> bands,
+                               const ProductRequest& request);
 
 float percentile(std::span<const float> values, float percent, core::ExecutionContext& context);
 

@@ -20,7 +20,7 @@ def main():
                if path.is_file() and not path.name.startswith("._") and path.suffix in (".cpp", ".hpp", ".h")]
     render_sources = [root / name for name in ("src/render_product.cpp", "src/render_detail.hpp",
                                                "src/core/render.cpp", "src/core/image_render.cpp")]
-    payload_literal = re.compile(r'"(?:mersi|mwri|pmr|giirs|fy4|FY-[34][A-Z]?|AGRI|GHI)(?:"|[^a-zA-Z])', re.IGNORECASE)
+    payload_literal = re.compile(r'"(?:mersi|mwri|amsr3|pmr|giirs|fy4|FY-[34][A-Z]?|AGRI|GHI)(?:"|[^a-zA-Z])', re.IGNORECASE)
     for source in render_sources:
         if payload_literal.search(source.read_text()):
             raise RuntimeError("Payload-specific literal in generic renderer: " + str(source))

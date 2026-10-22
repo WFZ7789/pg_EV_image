@@ -1,6 +1,7 @@
 /// SPDX-License-Identifier: MIT
 
 #include "sensors/hdf.hpp"
+#include "sensors/amsr3.hpp"
 #include "products/config.hpp"
 
 #include <H5Cpp.h>
@@ -862,12 +863,138 @@ private:
     }
 };
 
+
+class Amsr3Adapter final : public SensorAdapter {
+public:
+    Amsr3Adapter(const SourceFiles& sources,std::optional<ProfileReport> report)
+        : access_{std::move(report)},file_(sources.data.string(),H5F_ACC_RDONLY) {
+        const auto root = file_.openGroup("/");
+        metadata_.satellite = access_.text(root,"PlatformShortName");
+        metadata_.sensor = access_.text(root,"SensorShortName");
+        if (metadata_.satellite != "GOSAT-GW" || metadata_.sensor != "AMSR3" ||
+            access_.text(root,"processing_level") != "Level1B")
+            throw std::invalid_argument("AMSR3 adapter requires GOSAT-GW AMSR3 Level1B");
+        if ((!sources.geolocation.empty() && sources.geolocation != sources.data) || !sources.auxiliary.empty())
+            throw std::invalid_argument("AMSR3 Level1B contains its own geolocation; separate GEO/aux is unsupported");
+        metadata_.observation_begin = access_.text(root,"time_coverage_start");
+        metadata_.observation_end = access_.text(root,"time_coverage_end");
+        const auto& time = metadata_.observation_begin;
+        if (time.size() < 19 || time[10] != 'T') throw std::invalid_argument("Invalid AMSR3 observation timestamp");
+        metadata_.resolution = "native";
+        auto utc = time.substr(11);
+        if (utc.ends_with('Z')) utc.pop_back();
+        metadata_.labels = {sources.data.filename().string(),time.substr(0,10),utc+"(UTC)","GOSAT-GW AMSR3",""};
+        for (std::size_t id = 0; id < amsr3_channels.size(); ++id) {
+            const auto [channel,grid] = amsr3_channels[id];
+            const std::string grid_id(grid),path = "Tb_Ch"+std::string(channel);
+            auto& data = dataset(path);
+            const auto dims = Access::dimensions(data);
+            if (dims.size() != 2) throw std::invalid_argument("AMSR3 brightness temperature must have two axes");
+            const Shape shape{dims[0],dims[1]};
+            if (!shapes_.contains(grid_id)) {
+                if (!shapes_.empty() && shape.rows != shapes_.begin()->second.rows)
+                    throw std::invalid_argument("AMSR3 frequency grids have different scan counts");
+                shapes_.emplace(grid_id,shape);
+                metadata_.grids.push_back({.id = grid_id,.shape = shape});
+                for (const auto& prefix : {"Latitude_P","Longitude_P"}) {
+                    auto& coordinate = dataset(prefix+grid_id);
+                    if (Access::dimensions(coordinate) != dims) throw std::invalid_argument("AMSR3 coordinate shape mismatch");
+                    coordinate_fills_[prefix+grid_id] = access_.fills(coordinate);
+                    coordinate_scales_[prefix+grid_id] = {scalar(coordinate,"scale_factor"),scalar(coordinate,"add_offset")};
+                }
+            } else if (shapes_.at(grid_id) != shape) throw std::invalid_argument("AMSR3 polarization grid mismatch");
+            if (Access::dimensions(dataset(path+"_Quality")) != dims)
+                throw std::invalid_argument("AMSR3 quality shape mismatch");
+            BandDescriptor band;
+            band.id = int(id); band.name = access_.text(data,"long_name"); band.dataset = path; band.grid = grid_id;
+            band.unit = "DN"; band.calibrated_unit = access_.text(data,"units");
+            if (band.calibrated_unit != "K") throw std::invalid_argument("AMSR3 brightness temperature must be in kelvin");
+            band.fill_values = access_.fills(data);
+            band.valid_range = std::array<double,2>{scalar(data,"valid_min"),scalar(data,"valid_max")};
+            band.calibration.kind = CalibrationKind::linear;
+            band.calibration.provenance = path+" scale_factor/add_offset";
+            band.calibration.coefficients = {scalar(data,"scale_factor"),scalar(data,"add_offset")};
+            if ((*band.valid_range)[0] > (*band.valid_range)[1]) throw std::invalid_argument("Invalid AMSR3 raw valid range");
+            bands_.push_back(std::move(band));
+        }
+        auto& scans = dataset("ScanDataQuality");
+        const auto dims = Access::dimensions(scans);
+        if (dims.size() != 1 || dims[0] != metadata_.grids.front().shape.rows)
+            throw std::invalid_argument("AMSR3 scan quality shape mismatch");
+        const hsize_t origin[]{0},count[]{dims[0]};
+        scan_quality_ = access_.read(scans,origin,count);
+        metadata_.validate();
+    }
+    SensorMetadata metadata() const override { return metadata_; }
+    std::vector<BandDescriptor> bands() const override { return bands_; }
+    std::size_t preferred_block_rows(int band,Window window) override {
+        auto& data = dataset(bands_.at(band).dataset);
+        const auto properties = data.getCreatePlist();
+        if (properties.getLayout() != H5D_CHUNKED) return window.shape.rows;
+        hsize_t chunks[2]; properties.getChunk(2,chunks);
+        return std::min<std::size_t>(window.shape.rows,std::max<hsize_t>(256,chunks[0]));
+    }
+    SampleBlock read_window(int id,Window window) override try {
+        const auto& band = bands_.at(id);
+        window.validate(shapes_.at(band.grid));
+        const hsize_t origin[]{window.row,window.col},count[]{window.shape.rows,window.shape.cols};
+        auto raw = access_.read(dataset(band.dataset),origin,count);
+        auto quality = access_.read(dataset(band.dataset+"_Quality"),origin,count);
+        Raster<std::uint8_t> valid(window.shape);
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            const auto q = unsigned(quality[i]);
+            const auto scan = unsigned(scan_quality_[window.row+i/window.shape.cols]);
+            valid.values()[i] = std::isfinite(raw[i]) && !filled(raw[i],band.fill_values) &&
+                raw[i] >= (*band.valid_range)[0] && raw[i] <= (*band.valid_range)[1] &&
+                !(q & 0x8c) && !(scan & 0xf8) && (id >= 8 || (q & 3) < 2);
+        }
+        return {id,window,Raster<float>(window.shape,std::move(raw)),std::move(valid)};
+    } catch (const H5::Exception& error) { throw std::runtime_error("AMSR3 window read: "+error.getDetailMsg()); }
+    NativeGeometry read_geometry(const std::string& grid,Window window) override try {
+        window.validate(shapes_.at(grid));
+        const hsize_t origin[]{window.row,window.col},count[]{window.shape.rows,window.shape.cols};
+        const auto lat_path = "Latitude_P"+grid,lon_path = "Longitude_P"+grid;
+        auto lat = access_.read(dataset(lat_path),origin,count),lon = access_.read(dataset(lon_path),origin,count);
+        Raster<std::uint8_t> valid(window.shape);
+        for (std::size_t i = 0; i < lat.size(); ++i) {
+            const bool good = !filled(lat[i],coordinate_fills_.at(lat_path)) && !filled(lon[i],coordinate_fills_.at(lon_path));
+            const auto ls = coordinate_scales_.at(lat_path),os = coordinate_scales_.at(lon_path);
+            lat[i] = float(lat[i]*ls[0]+ls[1]); lon[i] = float(lon[i]*os[0]+os[1]);
+            valid.values()[i] = good && !(unsigned(scan_quality_[window.row+i/window.shape.cols]) & 0xf8) &&
+                std::isfinite(lat[i]) && std::isfinite(lon[i]) && lat[i] >= -90 && lat[i] <= 90 && lon[i] >= -180 && lon[i] <= 180;
+        }
+        return SwathGeometry{Raster<float>(window.shape,std::move(lat)),Raster<float>(window.shape,std::move(lon)),std::move(valid)};
+    } catch (const H5::Exception& error) { throw std::runtime_error("AMSR3 geometry read: "+error.getDetailMsg()); }
+private:
+    Access access_;
+    H5::H5File file_;
+    SensorMetadata metadata_;
+    std::vector<BandDescriptor> bands_;
+    std::map<std::string,Shape> shapes_;
+    std::map<std::string,H5::DataSet> datasets_;
+    std::map<std::string,std::vector<double>> coordinate_fills_;
+    std::map<std::string,std::array<double,2>> coordinate_scales_;
+    std::vector<float> scan_quality_;
+    H5::DataSet& dataset(const std::string& path) {
+        auto found = datasets_.find(path);
+        if (found == datasets_.end()) found = datasets_.emplace(path,file_.openDataSet(path)).first;
+        return found->second;
+    }
+    double scalar(const H5::H5Object& object,const std::string& name) const {
+        const auto values = access_.attribute(object,name);
+        if (values.size() != 1 || !std::isfinite(values[0])) throw std::invalid_argument("Invalid AMSR3 attribute: "+name);
+        return values[0];
+    }
+};
+
 }
 
 HdfSummary read_hdf_summary(const std::filesystem::path& path) try {
     H5::H5File data(path.string(),H5F_ACC_RDONLY);
     const auto root = data.openGroup("/");
     const Access access{};
+    if (access.text(root,"SensorShortName",false) == "AMSR3")
+        return {access.text(root,"PlatformShortName"),"AMSR3",access.text(root,"ProductName")};
     HdfSummary result{access.text(root,"Satellite Name"),access.text(root,"Sensor Identification Code",false),
                       access.text(root,"File Alias Name",false)};
     if (result.sensor.empty() && Access::exists(data,"SLV/zFactorCorrectedESurface") &&
@@ -882,6 +1009,9 @@ std::string identify_hdf_adapter(const core::SourceFiles& sources) try {
     H5::H5File data(sources.data.string(),H5F_ACC_RDONLY);
     const auto root = data.openGroup("/");
     const Access access{};
+    if (access.text(root,"SensorShortName",false) == "AMSR3" &&
+        access.text(root,"PlatformShortName",false) == "GOSAT-GW" &&
+        access.text(root,"processing_level",false) == "Level1B" && Access::exists(data,"Tb_Ch89AV")) return "amsr3";
     const auto satellite = access.text(root,"Satellite Name");
     const auto sensor = access.text(root,"Sensor Identification Code",false);
     if (satellite.rfind("FY-3",0) == 0) {
@@ -906,6 +1036,10 @@ std::string identify_hdf_adapter(const core::SourceFiles& sources) try {
 }
 
 void register_hdf_adapters(core::AdapterRegistry& registry, std::optional<core::ProfileReport> report) {
+    registry.add("amsr3",[report](const core::SourceFiles& sources) -> std::unique_ptr<core::SensorAdapter> {
+        try { return std::make_unique<Amsr3Adapter>(sources,report); }
+        catch (const H5::Exception& error) { throw std::runtime_error("AMSR3 adapter open: "+error.getDetailMsg()); }
+    });
     for (const std::string kind : {"mersi", "mwri", "fy4", "pmr", "giirs"})
         registry.add(kind, [kind, report](const core::SourceFiles& sources) {
             try { return std::make_unique<HdfAdapter>(sources, kind, report); }

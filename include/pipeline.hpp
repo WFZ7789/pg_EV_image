@@ -21,6 +21,7 @@ struct Request {
     std::string mode;
     int band = 0;
     std::string color;
+    std::optional<std::string> amsr3_scan;
     std::filesystem::path output;
     std::string projection = "geographic";
     bool grid = false;

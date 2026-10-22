@@ -23,6 +23,7 @@ ProductDefinition ProductRegistry::plan(const std::string& key,const core::Senso
 void register_products(ProductRegistry& registry) {
     registry.add("mersi",mersi_product);
     registry.add("mwri",mwri_product);
+    registry.add("amsr3",amsr3_product);
     registry.add("pmr",pmr_product);
     registry.add("fy4",fy4_product);
     registry.add("giirs",[](const auto& metadata,auto bands,const auto& request) {

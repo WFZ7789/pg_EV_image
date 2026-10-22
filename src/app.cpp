@@ -56,17 +56,6 @@ fy::Request load_job(const std::filesystem::path& filename) {
     return request;
 }
 
-std::optional<std::string> adapter_for_mode(const std::string& mode) {
-    if (mode == "LW" || mode == "MW" || mode == "IRall") return "giirs";
-    if (mode == "S" || mode == "W" || mode == "W84" || mode == "TCX" || mode == "TCN" ||
-        mode == "TCN2" || mode == "TCS" || mode == "TCR") return "mwri";
-    if (mode == "PMR") return "pmr";
-    if (mode == "Rr" || mode == "RTG" || mode == "RTpp" || mode == "RTEC" || mode == "RTEC16" ||
-        mode == "RT16" || mode == "RT+EC" || mode == "AGHI_ALD" || mode == "RX") return "fy4";
-    if (mode == "LL" || mode == "RT" || mode == "RMUL" || mode == "ECT" || mode == "EK" || mode == "TSG")
-        return "mersi";
-    return std::nullopt;
-}
 
 int execute(const fy::Request& request) {
     fy::core::ExecutionContext context(request.execution, "native");
@@ -96,10 +85,11 @@ int execute(const fy::Request& request) {
         }
         else {
             const auto& input = request.inputs.at(0);
-            const auto hinted = adapter_for_mode(request.mode);
-            const auto adapter = hinted ? *hinted : context.io().run([&] {
+            const auto adapter = context.io().run([&] {
                 return fy::sensors::identify_hdf_adapter({input.data,input.geo,input.aux});
             });
+            if (request.amsr3_scan && (adapter != "amsr3" || request.mode == "W"))
+                throw std::invalid_argument("--amsr3-scan requires an AMSR3 composite mode");
             if (adapter == "fy4") {
                 context.profile().set_scope("native_disk");
                 auto phase = context.profile().phase("native_render");
@@ -111,7 +101,7 @@ int execute(const fy::Request& request) {
                 fy::render_native_giirs(request,context);
             }
             else {
-                context.profile().set_scope(adapter == "mersi" || adapter == "mwri" || adapter == "pmr" ? "native_swath" : "native_scene");
+                context.profile().set_scope(adapter == "mersi" || adapter == "mwri" || adapter == "pmr" || adapter == "amsr3" ? "native_swath" : "native_scene");
                 auto phase = context.profile().phase("native_render");
                 fy::render_native_scene(request,adapter,context);
             }
@@ -133,6 +123,7 @@ int main(int argc, char** argv) {
     auto* inspect = app.add_subcommand("inspect", "查看输入元数据");
     auto* render = app.add_subcommand("render", "渲染单景产品");
     auto* mosaic = app.add_subcommand("mosaic", "拼接 FY-3 MERSI 连续轨段");
+    std::string amsr3_scan = "A";
     std::string inspect_path, data, geo, aux, mode, color, output, projection = "geographic", job;
     int band = 0, width = 0;
     double center_lat = 0, center_lon = 0, half_range = 0, grid_step = 0;
@@ -144,6 +135,8 @@ int main(int argc, char** argv) {
     render->add_option("-a,--aux", aux);
     render->add_option("-m,--mode", mode)->required();
     render->add_option("-b,--band", band);
+    render->add_option("--amsr3-scan", amsr3_scan, "AMSR3 合成使用的 89 GHz 扫描")
+        ->check(CLI::IsMember({"A","B","AB"}));
     render->add_option("-c,--color", color);
     render->add_option("-o,--output", output);
     render->add_option("--projection", projection)->check(CLI::IsMember({"geographic","orthographic"}));
@@ -176,6 +169,7 @@ int main(int argc, char** argv) {
         request.center_lat = center_lat; request.center_lon = center_lon;
         if (render->get_option("--half-range")->count()) request.half_range = half_range;
         request.grid_step = grid_step; request.grid = grid;
+        if (render->get_option("--amsr3-scan")->count()) request.amsr3_scan = amsr3_scan;
         request.execution = execution;
         return execute(request);
     } catch (const std::exception& error) {

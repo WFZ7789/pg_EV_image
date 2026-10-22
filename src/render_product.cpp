@@ -39,38 +39,44 @@ std::filesystem::path output_path(const Request& request) {
     return path;
 }
 
-MapPlan plan_map(const SwathGeometry& geometry,const Request& request,bool cropped) {
+MapPlan plan_map(std::span<const SwathGeometry* const> geometries,const Request& request,bool cropped) {
     MapProjection projection{request.projection == "orthographic",request.center_lat,request.center_lon};
     if (!projection.orthographic && !request.half_range) {
         double low = INFINITY,high = -INFINITY;
-        for (std::size_t i = 0; i < geometry.valid.values().size(); ++i)
-            if (geometry.valid.values()[i]) {
-                const double value = std::remainder(geometry.longitude.values()[i],360.0);
-                low = std::min(low,value); high = std::max(high,value);
-            }
+        for (const auto* pointer : geometries)
+            for (std::size_t i = 0; i < pointer->valid.values().size(); ++i)
+                if (pointer->valid.values()[i]) {
+                    const double value = std::remainder(pointer->longitude.values()[i],360.0);
+                    low = std::min(low,value); high = std::max(high,value);
+                }
         if (!std::isfinite(low)) throw std::invalid_argument("No valid geolocation samples");
         projection.center_longitude = high - low <= 180 ? (low + high) / 2 : 180;
     }
     MapBounds bounds{INFINITY,-INFINITY,INFINITY,-INFINITY};
-    const auto shape = geometry.latitude.shape();
-    std::size_t first_row = shape.rows,last_row = 0;
-    for (std::size_t i = 0; i < shape.elements(); ++i) {
-        if (!geometry.valid.values()[i]) continue;
-        const auto point = projection.project(geometry.latitude.values()[i],geometry.longitude.values()[i]);
-        if (!point.valid) continue;
-        if (request.half_range && !cropped) {
-            const double half = projection.orthographic ? std::sin(*request.half_range * Deg2rad) : *request.half_range;
-            const double x = projection.orthographic ? 0 : request.center_lon, y = projection.orthographic ? 0 : request.center_lat;
-            if (std::abs(point.x - x) > half || std::abs(point.y - y) > half) continue;
+    std::size_t native_rows = 0;
+    for (const auto* pointer : geometries) {
+        const auto& geometry = *pointer;
+        const auto shape = geometry.latitude.shape();
+        std::size_t first_row = shape.rows,last_row = 0;
+        for (std::size_t i = 0; i < shape.elements(); ++i) {
+            if (!geometry.valid.values()[i]) continue;
+            const auto point = projection.project(geometry.latitude.values()[i],geometry.longitude.values()[i]);
+            if (!point.valid) continue;
+            if (request.half_range && !cropped) {
+                const double half = projection.orthographic ? std::sin(*request.half_range * Deg2rad) : *request.half_range;
+                const double x = projection.orthographic ? 0 : request.center_lon, y = projection.orthographic ? 0 : request.center_lat;
+                if (std::abs(point.x - x) > half || std::abs(point.y - y) > half) continue;
+            }
+            bounds.left = std::min(bounds.left,point.x); bounds.right = std::max(bounds.right,point.x);
+            bounds.bottom = std::min(bounds.bottom,point.y); bounds.top = std::max(bounds.top,point.y);
+            first_row = std::min(first_row,i / shape.cols); last_row = std::max(last_row,i / shape.cols);
         }
-        bounds.left = std::min(bounds.left,point.x); bounds.right = std::max(bounds.right,point.x);
-        bounds.bottom = std::min(bounds.bottom,point.y); bounds.top = std::max(bounds.top,point.y);
-        first_row = std::min(first_row,i / shape.cols); last_row = std::max(last_row,i / shape.cols);
+        if (first_row != shape.rows) native_rows = std::max(native_rows,last_row-first_row+1);
     }
     if (!std::isfinite(bounds.left) || bounds.left >= bounds.right || bounds.bottom >= bounds.top ||
-        (!projection.orthographic && bounds.right - bounds.left > 180))
+        (!projection.orthographic && bounds.right - bounds.left > 360))
         throw std::invalid_argument("Map region has no valid extent; specify a center and half range");
-    const auto baseline = std::max<std::size_t>(3840,static_cast<std::size_t>((last_row - first_row + 1) * 1.6));
+    const auto baseline = std::max<std::size_t>(3840,static_cast<std::size_t>(native_rows * 1.6));
     const auto width = request.width ? static_cast<std::size_t>(request.width) : baseline;
     const double raw_height = width * (bounds.top - bounds.bottom) / (bounds.right - bounds.left);
     if (!std::isfinite(raw_height) || raw_height > 16000 || width > 16000)
@@ -78,6 +84,11 @@ MapPlan plan_map(const SwathGeometry& geometry,const Request& request,bool cropp
     const Shape pixels{std::max<std::size_t>(1,static_cast<std::size_t>(raw_height)),width};
     if (pixels.elements() > 256000000) throw std::invalid_argument("Map exceeds 256 million pixels");
     return {{projection,bounds,pixels},LayoutTransform::make(pixels,{.baseline_map_width = double(baseline)})};
+}
+
+MapPlan plan_map(const SwathGeometry& geometry,const Request& request,bool cropped) {
+    const SwathGeometry* pointer = &geometry;
+    return plan_map(std::span(&pointer,1),request,cropped);
 }
 
 void annotations(cv::Mat& canvas,const MapView& view,const LayoutTransform& layout,const products::PreparedProduct& product,
@@ -297,6 +308,47 @@ namespace fy {
 using namespace core;
 using namespace render_detail;
 
+void render_swath_products(const Request& request,std::span<const products::LoadedProduct> products,
+                           ExecutionContext& context,const ProductRenderOptions& options) {
+    validate_request(request,false);
+    if (products.empty()) throw std::invalid_argument("Missing swath products");
+    if (options.bit_depth != 8 && options.bit_depth != 16) throw std::invalid_argument("Unsupported output bit depth");
+    const auto path = output_path(request);
+    if (options.bit_depth == 16 && (path.extension() == ".jpg" || path.extension() == ".jpeg"))
+        throw std::invalid_argument("16-bit output requires PNG or TIFF");
+    std::vector<const SwathGeometry*> geometries;
+    for (const auto& loaded : products) {
+        loaded.product.frame.validate();
+        if (loaded.product.frame.name != products.front().product.frame.name)
+            throw std::invalid_argument("Swath products use different modes");
+        geometries.push_back(&std::get<SwathGeometry>(*loaded.product.frame.geometry));
+    }
+    const auto map = plan_map(geometries,request,options.region_already_selected);
+    std::vector<ProjectedSwath> projections;
+    std::vector<SwathRasterSource> sources;
+    projections.reserve(products.size()); sources.reserve(products.size());
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        const auto& loaded = products[i];
+        projections.push_back(project_swath(*geometries[i],map.view,context));
+        SwathRasterSource source;
+        source.cells = geometries[i]->latitude.shape(); source.vertices = projections.back().vertices.view();
+        source.display = loaded.product.display; source.source_column = loaded.source_window.col;
+        source.source_columns = loaded.source_shape.cols; source.scene_order = i;
+        if (!map.view.projection.orthographic)
+            source.horizontal_period_pixels = 360.*map.view.pixels.cols/(map.view.bounds.right-map.view.bounds.left);
+        for (const auto& plane : loaded.product.frame.planes) {
+            source.planes.push_back(plane.values.view()); source.valid.push_back(plane.valid.view());
+        }
+        sources.push_back(std::move(source));
+    }
+    RasterOptions raster_options;
+    raster_options.layout = map.layout; raster_options.bit_depth = options.bit_depth;
+    raster_options.exact_coverage = products.size() > 1;
+    if (products.size() > 1) raster_options.overlap = OverlapPolicy::scan_center;
+    auto rendered = rasterize_swaths(sources,raster_options,context);
+    save_frame(rendered,map,products.front().product,request,path,context);
+}
+
 void render_product(const Request& request,const products::LoadedProduct& loaded,ExecutionContext& context,
                     const ProductRenderOptions& options) {
     validate_request(request,false);
@@ -306,21 +358,7 @@ void render_product(const Request& request,const products::LoadedProduct& loaded
         throw std::invalid_argument("16-bit output requires PNG or TIFF");
     loaded.product.frame.validate();
     if (std::holds_alternative<SwathGeometry>(*loaded.product.frame.geometry)) {
-        const auto& product = loaded.product;
-        const auto& geometry = std::get<SwathGeometry>(*product.frame.geometry);
-        const auto map = plan_map(geometry,request,options.region_already_selected);
-        auto projected = project_swath(geometry,map.view,context);
-        SwathRasterSource source;
-        source.cells = geometry.latitude.shape(); source.vertices = projected.vertices.view(); source.display = product.display;
-        source.source_column = loaded.source_window.col; source.source_columns = loaded.source_shape.cols;
-        for (const auto& plane : product.frame.planes) {
-            source.planes.push_back(plane.values.view()); source.valid.push_back(plane.valid.view());
-        }
-        RasterOptions raster_options;
-        raster_options.layout = map.layout; raster_options.bit_depth = options.bit_depth;
-        raster_options.exact_coverage = false;
-        auto rendered = rasterize_swaths(std::span(&source,1),raster_options,context);
-        save_frame(rendered,map,product,request,path,context);
+        render_swath_products(request,std::span(&loaded,1),context,options);
         return;
     }
     if (!std::holds_alternative<NativeDiskGeometry>(*loaded.product.frame.geometry) &&

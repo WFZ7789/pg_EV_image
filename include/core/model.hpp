@@ -173,6 +173,8 @@ struct InputDependency {
     bool raw_samples = false;
     /// @brief 以 360 度周期插值方位角。
     bool cyclic_degrees = false;
+    /// @brief 使用观测经纬度对齐，不能以数组尺寸推断共址。
+    bool geographic_alignment = false;
 };
 
 struct FramePlan {
@@ -191,6 +193,8 @@ struct ProductPlan {
     std::vector<FramePlan> frames;
     bool stream_frames = false;
     std::optional<double> regional_default_half_range;
+    /// @brief 在区域读取包围盒内继续屏蔽经纬度范围之外的观测。
+    bool clip_to_region = false;
     void validate(const SensorMetadata& metadata, std::span<const BandDescriptor> bands) const;
 };
 

@@ -1,6 +1,6 @@
 # pg_EV_image
 
-风云卫星 HDF5 图像渲染工具，支持 FY3 MERSI、MWRI、PMR 和 FY4 AGRI/GHI、GIIRS 的现有产品模式，并提供 MERSI 经纬网与连续轨段拼接。
+卫星图像渲染工具，支持 FY3 MERSI、MWRI、PMR、FY4 AGRI/GHI、GIIRS，以及 GOSAT-GW AMSR3 L1B，并提供经纬网与 MERSI 连续轨段拼接。
 
 ## 构建
 
@@ -61,6 +61,24 @@ EC 的 3.8 μm 混合权重在 10.8 μm 亮温从 −40°C 降至 −60°C 时�
   --half-range 20 --width 2400 --grid --grid-step 5 -o output/区域.png
 ```
 
+AMSR3 L1B 的 `.nc` 文件包含亮温和定位，无需单独提供 GEO。`W -b 0..20` 按
+标准通道顺序选择单通道亮温，单位 K；`inspect` 会列出编号和频率。
+合成支持 `W84`、`TCX`、`TCS`、`TCR`，通过 `--amsr3-scan A|B|AB` 选择
+89 GHz A、B 或合并扫描，默认 A。默认显示完整半轨，也可使用上述区域、投影和经纬网选项。
+
+```bash
+./cmake-build-release/pg_EV_image render \
+  -d testdata/GGWAM3_202610200333A024_S1BTBBGAZ01A26293.nc \
+  -m W -b 18 --width 2400 -o output/amsr3_165v.png
+
+./cmake-build-release/pg_EV_image render \
+  -d testdata/GGWAM3_202610200333A024_S1BTBBGAZ01A26293.nc \
+  -m TCS --amsr3-scan AB --width 2400 --profile -o output/amsr3_tcs_ab.png
+```
+
+跨频段合成按实际经纬度对齐；这是可视化位置插值，与官方 L1R 足迹匹配不同。
+完整通道表、质量处理和验证方法见 [AMSR3 支持说明](docs/AMSR3.md)。
+
 拼接相邻 MERSI 轨段：复制 [示例任务](examples/mersi-mosaic.json)，为每段填写真实的数据和 GEO 路径，然后运行：
 
 ```bash
@@ -118,6 +136,7 @@ FY4 经纬网需要圆盘导航，正交投影当前仍用于 MERSI 地图流程
 MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`ECT`、`EK`、`TSG`。
 FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
 GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
+AMSR3：`W`、`W84`、`TCX`、`TCS`、`TCR`；不支持需要 53/118 GHz 输入的 `TCN/TCN2`。
 
 GIIRS 的 `LW`、`MW` 使用从 0 开始的光谱通道编号，页脚保留中心波数，亮温单位为 K。
 `IRall` 先输出全部 MW 通道，再输出全部 LW 通道，以 `000000` 起连续编号；每个光谱族共用显示范围，

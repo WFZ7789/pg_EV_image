@@ -13,7 +13,16 @@ void inspect(const std::filesystem::path& data) {
               << "Sensor: " << summary.sensor << '\n'
               << "Alias: " << summary.alias << '\n'
               << "Data: " << data << '\n';
-    if (summary.sensor.find("MERSI") != std::string::npos)
+    if (summary.sensor == "AMSR3") {
+        core::AdapterRegistry registry;
+        sensors::register_hdf_adapters(registry);
+        auto session = registry.open("amsr3",{data,{},{}});
+        const auto metadata = session.metadata();
+        std::cout << "Observation: " << metadata.observation_begin << " / " << metadata.observation_end << '\n'
+                  << "Modes: W W84 TCX TCS TCR\nScans: A B AB (composites; default A)\n";
+        for (const auto& band : session.bands()) std::cout << "Band " << band.id << ": " << band.name << " [" << band.grid << "]\n";
+    }
+    else if (summary.sensor.find("MERSI") != std::string::npos)
         std::cout << "Modes: E R LL RT RY RF RMUL EC ECT EK TSG (实际支持情况依卫星和分辨率而定)\n";
     else if (summary.sensor.find("MWRI") != std::string::npos)
         std::cout << "Modes: S W W84 TCX TCN TCN2 TCS TCR (依卫星和通道而定)\n";
