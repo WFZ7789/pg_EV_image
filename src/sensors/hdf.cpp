@@ -738,7 +738,8 @@ private:
     void add_fy4_angles() {
         const std::array fields{std::pair{solar_zenith,"Navigation/NOMSunZenith"},
                                 std::pair{solar_azimuth,"Navigation/NOMSunAzimuth"},
-                                std::pair{satellite_zenith,"Navigation/NOMSatelliteZenith"}};
+                                std::pair{satellite_zenith,"Navigation/NOMSatelliteZenith"},
+                                std::pair{satellite_azimuth,"Navigation/NOMSatelliteAzimuth"}};
         bool initialized = false;
         for (const auto& [id,path] : fields) {
             if (!Access::exists(file(SourceRole::geolocation),path)) continue;

@@ -47,14 +47,22 @@ def main():
             return output, report
 
         outputs = {}
-        for mode in ("E", "R", "Re", "Rr", "EC", "RF", "RY", "RX", "RTpp", "RTEC", "RT+EC", "AGHI_ALD", "RTEC16", "RT16"):
+        for mode in ("E", "R", "Re", "Rr", "EC", "RF", "RY", "RX", "RTpp", "RTBlack", "RTEC", "RT+EC", "AGHI_ALD", "RTEC16", "RT16"):
             output, report = render(mode, mode.replace("+", "plus"))
             outputs[mode] = output
             check(report["output"] == {"width": 356 if mode in ("RTEC16", "RT16") else 556, "height": 580}, "FY4 native layout changed")
             check(report["source_pixels"] == 256 * 256 and "image_rasterization" in report["phases"], "FY4 native raster fast path was skipped")
+        black_report = json.loads(Path(str(outputs["RTBlack"]) + ".profile.json").read_text())
+        check(black_report["phases"]["rayleigh"]["calls"] == 1 and
+              black_report["phases"]["white_balance"]["calls"] == 1, "RTBlack correction was skipped")
+        for curve in ("linear", "srgb"):
+            output, _ = render("RTBlack", "RTBlack-" + curve, extras=("-c", curve))
+            check(digest(output) != digest(outputs["RTBlack"]), "RTBlack curve was ignored")
+        render("RTBlack", "ghi-black", sensor="ghi", expected=2)
+        render("RTBlack", "bad-curve", extras=("-c", "unknown"), expected=2)
         for aliases in (("R", "Re"), ("RTEC", "RT+EC", "AGHI_ALD"), ("RTEC16", "RT16")):
             check(len({digest(outputs[mode]) for mode in aliases}) == 1, "FY4 alias results differ")
-        for mode in ("RTEC", "RTEC16"):
+        for mode in ("RTBlack", "RTEC", "RTEC16"):
             for threads in (1, 0):
                 output, _ = render(mode, mode + "-t" + str(threads), threads)
                 check(digest(output) == digest(outputs[mode]), "FY4 threads changed native pixels")

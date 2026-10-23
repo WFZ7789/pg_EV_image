@@ -44,7 +44,8 @@ void inspect(const std::filesystem::path& original) {
     else if (summary.sensor == "GIIRS")
         std::cout << "Modes: R LW MW IRall\n";
     else if (summary.satellite.rfind("FY-4",0) == 0)
-        std::cout << "Modes: E R Re Rr EC RF RY RX RTpp RTEC RTEC16 RTG AGHI_ALD RT16 RT+EC\n";
+        std::cout << "Modes: E R Re Rr EC RF RY RX RTpp RTEC RTEC16 RTG AGHI_ALD RT16 RT+EC"
+                  << (summary.satellite == "FY-4B" && summary.sensor == "AGRI" ? " RTBlack" : "") << '\n';
 }
 
 }

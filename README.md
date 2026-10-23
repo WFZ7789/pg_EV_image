@@ -140,6 +140,14 @@ FY4 经纬网需要圆盘导航，正交投影当前仍用于 MERSI 地图流程
 
 MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`ECT`、`TSG`。
 FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
+FY-4B AGRI 另支持 `RTBlack`：沿用极轨 RT 的暗调显示；使用 1/2/3 波段和 GEO 的四种太阳/卫星角度，
+按蓝/红/近红外名义波长 0.470/0.650/0.825 μm 扣除瑞利散射后，使用既有 AGRI 矩阵合成绿和校正红色。
+用太阳天顶角小于 70°、观测天顶角小于 65° 的日间样本估计中亮中性云白平衡和 RGB 峰值的 99.5% 分位白点；
+没有这类样本时回退到全部有效日间样本。白点约束在 0.8～1.2，保持零黑场，并同比例连续压缩高光，避免异常亮像元压暗整景。
+中亮云减弱蓝光瑞利扣除，太阳角校正的余弦下限为 0.15；支持 `-c linear`、`-c srgb`、`-c contrast`。
+夜间和无效角度不参与成图；支持 1KM 主数据配 4KM GEO，无需红外辅助数据；区域图沿用整景统计。
+例如：`pg_EV_image render -d FY4B_1000M.HDF -g FY4B_GEO_4000M.HDF -m RTBlack -o output/RTBlack.jpg`。
+
 GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
 AMSR3：`W`、`W84`、`TCX`、`TCS`、`TCR`；不支持需要 53/118 GHz 输入的 `TCN/TCN2`。
 METimage：`R`、`RMUL`、`E`、`RT`、`RY`、`RF`、`EC`、`ECT`、`TSG`。

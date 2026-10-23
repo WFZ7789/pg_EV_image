@@ -32,7 +32,7 @@ inline void write(const std::filesystem::path& path,const std::string& satellite
         auto table = dataset(file,"Calibration/CALChannel" + suffix,table_shape,coefficients);
         hdf_fixture::numbers(table,"FillValue",{-65535});
     }
-    for (auto name : {"NOMSunZenith","NOMSunAzimuth","NOMSatelliteZenith"}) {
+    for (auto name : {"NOMSunZenith","NOMSunAzimuth","NOMSatelliteZenith","NOMSatelliteAzimuth"}) {
         std::vector<float> values(rows * cols);
         for (std::size_t row = 0; row < rows; ++row)
             for (std::size_t col = 0; col < cols; ++col)

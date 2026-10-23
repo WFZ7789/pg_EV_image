@@ -1,6 +1,7 @@
 /// SPDX-License-Identifier: MIT
 
 #include "products/fy4.hpp"
+#include "products/rayleigh.hpp"
 #include "common.hpp"
 #include "core/resample.hpp"
 #include "sensors/hdf.hpp"
@@ -82,6 +83,105 @@ void compose_rtec(std::vector<ScalarPlane>& inputs,const ScalarPlane& shade,Exec
     context.profile().record_computed(shape.elements());
 }
 
+/// @brief AGRI 暗调反射率：限制低太阳高度增益，减轻中亮云层的蓝光过度扣除。
+void correct_rtblack(std::span<ScalarPlane> inputs,double distance,ExecutionContext& context) {
+    const auto shape = inputs[0].values.shape();
+    auto phase = context.profile().phase("rayleigh");
+    const std::array<double,3> tau{rayleigh_optical_depth(0.470),rayleigh_optical_depth(0.825),rayleigh_optical_depth(0.650)};
+    context.parallel_rows(shape.rows,[&](std::size_t begin,std::size_t end) {
+        for (auto i = begin * shape.cols; i < end * shape.cols; ++i) {
+            bool valid = true;
+            for (const auto& plane : inputs) valid = valid && plane.valid.values()[i] && std::isfinite(plane.values.values()[i]);
+            const double solar = inputs[3].values.values()[i],view = inputs[5].values.values()[i];
+            valid = valid && solar >= 0 && solar < 90 && view >= 0 && view < 90;
+            const double mus = std::max(std::cos(solar * Deg2rad),0.15),muv = std::max(std::cos(view * Deg2rad),0.0);
+            std::array<float,3> clean{};
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                clean[channel] = float(inputs[channel].values.values()[i] * distance * distance / mus);
+                valid = valid && clean[channel] >= 0 && clean[channel] <= 2.5f;
+            }
+            if (valid) {
+                const double cloud = std::pow(std::clamp((0.65 - clean[2]) / 0.50,0.0,1.0),2);
+                const double azimuth = double(inputs[4].values.values()[i]) - inputs[6].values.values()[i];
+                for (std::size_t channel = 0; channel < 3; ++channel) {
+                    const double path = rayleigh_path_reflectance(tau[channel],mus,std::max(muv,0.1),azimuth);
+                    clean[channel] = float(std::max(0.0,clean[channel] - 0.85 * cloud * path));
+                }
+                const float b = clean[0],nir = clean[1],r = clean[2];
+                clean[1] = 0.45f * b + 0.45f * r + 0.10f * nir;
+                clean[2] = std::max(0.0f,-0.1992f * b + 1.3768f * r - 0.1770f * nir);
+            }
+            for (std::size_t channel = 0; channel < 3; ++channel) {
+                inputs[channel].values.values()[i] = valid ? clean[channel] : NAN;
+                inputs[channel].valid.values()[i] = valid;
+            }
+        }
+    });
+    context.profile().record_computed(shape.elements());
+}
+
+/// @brief 用非临边日间样本估计中性云白平衡与稳健白点，连续压缩高光。
+DisplayDescriptor rtblack_display(std::span<ScalarPlane> bgr,const ScalarPlane& solar,const ScalarPlane& view,
+                                  const std::string& curve,ExecutionContext& context) {
+    auto phase = context.profile().phase("white_balance");
+    const auto size = bgr[0].values.shape().elements();
+    const auto eligible = [&](std::size_t i,bool interior) {
+        for (const auto& plane : bgr)
+            if (!plane.valid.values()[i] || !std::isfinite(plane.values.values()[i])) return false;
+        return !interior || (solar.values.values()[i] < 70 && view.values.values()[i] < 65);
+    };
+    bool interior = false;
+    for (std::size_t i = 0; i < size && !interior; ++i) interior = eligible(i,true);
+    std::array<double,3> sum{};
+    for (std::size_t i = 0; i < size; ++i) {
+        if (!eligible(i,interior)) continue;
+        const float b = bgr[0].values.values()[i],g = bgr[1].values.values()[i],r = bgr[2].values.values()[i];
+        const auto peak = std::max({b,g,r}),low = std::min({b,g,r});
+        if (peak < 0.2f || peak > 0.85f || low < 0.70f * peak) continue;
+        sum[0] += r; sum[1] += g; sum[2] += b;
+    }
+    DisplayScale scale{0,1};
+    const double target = *std::max_element(sum.begin(),sum.end());
+    for (std::size_t channel = 0; channel < 3; ++channel)
+        if (sum[channel] > 0) scale.rgb_gain[channel] = std::clamp(target / sum[channel],1.0,1.35);
+    auto memory = context.profile().reserve(BufferKind::statistics,65536 * sizeof(std::uint64_t));
+    std::vector<std::uint64_t> histogram(65536);
+    std::uint64_t samples = 0;
+    for (std::size_t i = 0; i < size; ++i) {
+        if (!eligible(i,interior)) continue;
+        double peak = 0;
+        for (std::size_t channel = 0; channel < 3; ++channel)
+            peak = std::max(peak,bgr[2 - channel].values.values()[i] * scale.rgb_gain[channel]);
+        const auto bin = std::size_t(std::clamp(peak / 4.0,0.0,1.0) * 65535);
+        ++histogram[bin]; ++samples;
+    }
+    if (!samples) throw std::invalid_argument("RTBlack has no valid daytime samples");
+    const auto rank = samples - samples / 200;
+    std::uint64_t cumulative = 0;
+    for (std::size_t bin = 0; bin < histogram.size(); ++bin) {
+        cumulative += histogram[bin];
+        if (cumulative < rank) continue;
+        scale.high = std::clamp((bin + 1) * 4.0 / 65535,0.8,1.2);
+        break;
+    }
+    DisplayDescriptor display;
+    display.balanced_rgb = true; display.scale = scale;
+    display.mapper = [curve = curve.empty() ? std::string("contrast") : curve](std::span<const float> values,const DisplayScale& scale) {
+        std::array<float,3> rgb_values;
+        for (std::size_t channel = 0; channel < 3; ++channel)
+            rgb_values[channel] = float(std::max(0.0,values[2 - channel] * scale.rgb_gain[channel] / scale.high));
+        const float peak = *std::max_element(rgb_values.begin(),rgb_values.end());
+        const float mapped = peak <= 0.7f ? peak : 0.7f + 0.3f * -std::expm1(-(peak - 0.7f) / 0.3f);
+        for (auto& value : rgb_values) {
+            value *= peak > 0 ? mapped / peak : 1;
+            if (curve == "contrast") value = value * value * (3 - 2 * value);
+            if (curve != "linear") value = value <= 0.0031308f ? 12.92f * value : 1.055f * std::pow(value,1.0f / 2.4f) - 0.055f;
+        }
+        return rgb(rgb_values[0],rgb_values[1],rgb_values[2]);
+    };
+    return display;
+}
+
 ScalarPlane align(const ScalarPlane& plane,Shape shape,ExecutionContext& context) {
     const auto source = plane.values.shape();
     auto result = resample_cubic(plane.values.view(),plane.valid.view(),{0,0,source},source,{0,0,shape},shape,false,context);
@@ -109,7 +209,12 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
     const bool rtec = mode == "RTEC" || mode == "RTEC16";
     if ((mode == "RTG" && !ghi) || ((rtec || mode == "EC") && ghi))
         throw std::invalid_argument("FY4 mode is not configured for sensor: " + metadata.sensor);
-    if (mode == "E" || mode == "Rr") { ids = {request.band}; units = {mode == "E" ? "degC" : "1"}; }
+    if (mode == "RTBlack") {
+        allowed(metadata.satellite,{"FY-4B"});
+        if (ghi) throw std::invalid_argument("RTBlack requires FY-4B AGRI");
+        ids = {1,3,2,sensors::solar_zenith,sensors::solar_azimuth,sensors::satellite_zenith,sensors::satellite_azimuth};
+        units = {"1","1","1"};
+    } else if (mode == "E" || mode == "Rr") { ids = {request.band}; units = {mode == "E" ? "degC" : "1"}; }
     else if (mode == "R") { ids = {request.band,sensors::solar_zenith}; units = {"1"}; }
     else if (mode == "EC") { ids = {7,12,13,14,sensors::solar_zenith,sensors::solar_azimuth}; units = {"1","1","1"}; }
     else if (rtec) {
@@ -127,6 +232,9 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
         ids = {4,3,2,sensors::solar_zenith,sensors::satellite_zenith}; units = {"1","1","1"};
         if (auxiliary) ids.push_back(sensors::auxiliary_band_offset + 1);
     } else throw std::invalid_argument("Unknown FY4 product: " + mode);
+    if (mode == "RTBlack" && !request.color.empty() && request.color != "contrast" &&
+        request.color != "srgb" && request.color != "linear")
+        throw std::invalid_argument("RTBlack display curve must be contrast, srgb or linear");
     const bool reflection = mode != "E" && mode != "Rr" && mode != "EC";
     if (reflection && !metadata.numeric_attributes.contains("earth_sun_distance_au"))
         throw std::invalid_argument("FY4 reflection product needs Earth-Sun distance ratio");
@@ -135,6 +243,8 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
         const auto target = mode == "RTG" && id == sensors::solar_zenith ? band.grid :
                             mode == "RTG" && id == sensors::auxiliary_band_offset + 1 ? "auxiliary" : "native";
         plan.inputs.push_back({id,target,mode == "EC" || rtec ? 10u : 0u,mode == "EC" || rtec ? 10u : 0u,rtec,rtec || mode == "EC" || mode == "RF"});
+        plan.inputs.back().cyclic_degrees = mode == "RTBlack" &&
+            (id == sensors::solar_azimuth || id == sensors::satellite_azimuth);
     }
     plan.frames.push_back({.name = mode,.units = units,.bit_depth = mode == "RTEC16" ? 16 : 8,
                            .grid = mode == "RTG" && auxiliary ? "auxiliary" : "native"});
@@ -144,6 +254,13 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
         spec.ordered = operation == StatisticsOperation::mean;
         plan.statistics.push_back(spec);
     };
+    if (mode == "RTBlack") {
+        statistic(StatisticsOperation::mean,"neutral_cloud_rgb");
+        plan.statistics.back().include_masked_finite = false;
+        statistic(StatisticsOperation::percentile,"reflection_rgb_peak",99.5f);
+        auto& spec = plan.statistics.back();
+        spec.include_masked_finite = false; spec.exclude_nan_only = false; spec.upper_cutoff = 4;
+    }
     if (mode == "Rr") statistic(StatisticsOperation::percentile,"reflection",99.9f);
     if (mode == "RF" || mode == "AGHI_ALD") statistic(StatisticsOperation::percentile,"temperature",95);
     if (mode == "RF") statistic(StatisticsOperation::mean,"background_ratio");
@@ -157,7 +274,7 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
     std::vector<Shape> input_shapes;
     for (const auto& dependency : plan.inputs) input_shapes.push_back(metadata.grid(dependency.target_grid).shape);
     const auto output_shape = metadata.grid(plan.frames.front().grid).shape;
-    result.prepare = [metadata,mode,description,count,rtec,auxiliary,input_shapes,output_shape](std::vector<ScalarPlane>&& inputs,
+    result.prepare = [metadata,mode,description,count,rtec,auxiliary,input_shapes,output_shape,curve = request.color](std::vector<ScalarPlane>&& inputs,
                       std::shared_ptr<const NativeGeometry> geometry,ExecutionContext& context) {
         const auto shape = metadata.grid("native").shape;
         if (!geometry || geometry_shape(*geometry) != output_shape || inputs.size() != count)
@@ -168,7 +285,8 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
         auto phase = context.profile().phase("product");
         PreparedProduct output;
         output.frame.name = mode; output.frame.geometry = geometry;
-        output.labels = labels(metadata,mode == "E" || mode == "R" || mode == "Rr" ? description : "",true);
+        output.labels = labels(metadata,mode == "RTBlack" ? "RTBlack: Rayleigh, synthetic green" :
+                               mode == "E" || mode == "R" || mode == "Rr" ? description : "",true);
         const auto to_celsius = [&](ScalarPlane& plane) {
             transform(plane,context,[](float value,std::size_t) { return float(value + K2c); }); plane.unit = "degC";
         };
@@ -179,6 +297,10 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
             } else if (mode == "Rr") output.display = scalar_display("",palette::color_refsb,{0,std::clamp(percentile(inputs[0].values.values(),99.9f,context),1.0f,2.0f)});
             else { solar_correct(inputs[0],inputs[1],distance,context); output.display = scalar_display("",palette::color_enhanced_vis,{0,2}); }
             inputs.resize(1);
+        } else if (mode == "RTBlack") {
+            correct_rtblack(inputs,distance,context);
+            output.display = rtblack_display(std::span(inputs).first(3),inputs[3],inputs[5],curve,context);
+            inputs.resize(3);
         } else if (rtec) {
             context.parallel_rows(shape.rows,[&](std::size_t begin,std::size_t end) {
                 for (std::size_t channel = 3; channel <= 6; ++channel) {
