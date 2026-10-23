@@ -17,6 +17,7 @@ void calibrate(SampleBlock& block, const CalibrationDescriptor& calibration, Exe
         case CalibrationKind::linear: required = 2; break;
         case CalibrationKind::polynomial: required = 5; break;
         case CalibrationKind::physical: required = 5; break;
+        case CalibrationKind::planck_wavelength: required = 5; break;
         case CalibrationKind::lookup: required = 1; break;
     }
     if ((calibration.kind != CalibrationKind::lookup && coefficients.size() != required) ||
@@ -27,6 +28,8 @@ void calibrate(SampleBlock& block, const CalibrationDescriptor& calibration, Exe
             if (!std::isfinite(coefficient)) throw std::invalid_argument("Nonfinite calibration coefficient");
     if (calibration.kind == CalibrationKind::physical && coefficients[2] <= 0)
         throw std::invalid_argument("Invalid Planck wavenumber");
+    if (calibration.kind == CalibrationKind::planck_wavelength && coefficients[2] <= 0)
+        throw std::invalid_argument("Invalid Planck wavelength");
     auto phase = context.profile().phase("calibration");
     auto values = block.values.values();
     auto valid = block.valid.values();
@@ -47,6 +50,13 @@ void calibrate(SampleBlock& block, const CalibrationDescriptor& calibration, Exe
                 else if (calibration.kind == CalibrationKind::physical)
                     value = static_cast<float>(brtemp(value, coefficients[2]) *
                                                static_cast<float>(coefficients[3]) + static_cast<float>(coefficients[4]));
+                else if (calibration.kind == CalibrationKind::planck_wavelength) {
+                    constexpr double h = 6.626069e-34, c = 299792458, k = 1.38065e-23;
+                    const double wavelength = coefficients[2] * 1e-6;
+                    const double radiance = double(value) * 1e6;
+                    value = radiance > 0 ? float(h*c/(k*wavelength*std::log1p(2*h*c*c/
+                        (std::pow(wavelength,5)*radiance)))*coefficients[3]+coefficients[4]) : NAN;
+                }
             }
             bool calibrated_valid = std::isfinite(value);
             for (const auto fill : calibration.fill_values)

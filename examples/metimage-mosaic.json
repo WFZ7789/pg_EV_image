@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "inputs": [
+    {
+      "data": "../testdata/W_XX-EUMETSAT-Darmstadt,SAT,SGA1-VII-1B-RAD_C_EUMT_20261022014115_G_O_20261022005600_20261022005658_C_N_T__.zip"
+    },
+    {
+      "data": "../testdata/W_XX-EUMETSAT-Darmstadt,SAT,SGA1-VII-1B-RAD_C_EUMT_20261022014108_G_O_20261022005658_20261022005759_C_N_T__.zip"
+    }
+  ],
+  "mode": "RT",
+  "map": {
+    "projection": "geographic",
+    "width": 2400,
+    "grid": 1,
+    "grid_step": 5
+  },
+  "output": "../output/metimage-mosaic.jpg"
+}

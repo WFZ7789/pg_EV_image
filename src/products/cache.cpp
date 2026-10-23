@@ -75,7 +75,7 @@ struct CachedSwath::Impl {
     CacheFile geometry,numeric,projected;
     Shape shape,source_shape;
     Window source_window;
-    std::size_t block_size,columns,plane_count;
+    std::size_t block_size,columns,plane_count,scan_rows = 0,first_source_row = 0;
     std::vector<Block> blocks;
     DisplayDescriptor display;
     std::vector<std::string> labels;
@@ -90,6 +90,10 @@ struct CachedSwath::Impl {
           plane_count(product.product.frame.planes.size()),display(product.product.display),labels(product.product.labels),extra(product.product.extra_label) {
         if (!block_size || !plane_count) throw std::invalid_argument("Invalid swath cache block size");
         product.product.frame.validate();
+        const auto& native = std::get<SwathGeometry>(*product.product.frame.geometry);
+        scan_rows = native.scan_rows; first_source_row = native.first_source_row;
+        if (scan_rows && (block_size != scan_rows || first_source_row%scan_rows || shape.rows%scan_rows))
+            throw std::invalid_argument("Scan cache requires complete scan-aligned blocks");
         auto phase = context.profile().phase("cache_write");
         {
             auto output = geometry.create();
@@ -147,21 +151,37 @@ void CachedSwath::project(const MapView& map) {
     auto phase = data.context.profile().phase("cache_projection");
     auto memory = data.context.profile().reserve(BufferKind::scene,data.shape.elements() * 9);
     SwathGeometry geometry{Raster<float>(data.shape),Raster<float>(data.shape),Raster<std::uint8_t>(data.shape)};
+    geometry.scan_rows = data.scan_rows; geometry.first_source_row = data.first_source_row;
     {
         auto input = data.geometry.open();
         data.geometry.read(input,geometry.latitude.values()); data.geometry.read(input,geometry.longitude.values()); data.geometry.read(input,geometry.valid.values());
     }
-    auto projected = project_swath(geometry,map,data.context);
     auto scratch_memory = data.context.profile().reserve(BufferKind::statistics,Shape{std::min(data.block_size,data.shape.rows) + 1,
                                                                                        std::min(data.block_size,data.shape.cols) + 1}.elements() * sizeof(PixelPoint));
     std::vector<PixelPoint> scratch;
     scratch.reserve(Shape{std::min(data.block_size,data.shape.rows) + 1,std::min(data.block_size,data.shape.cols) + 1}.elements());
     auto output = data.projected.create();
-    for (auto& block : data.blocks) {
-        block.vertices = data.projected.bytes();
-        copy_region<PixelPoint>(projected.vertices.view(),{block.window.row,block.window.col,
-                                  {block.window.shape.rows + 1,block.window.shape.cols + 1}},scratch);
-        data.projected.write(output,std::span<const PixelPoint>(scratch));
+    if (data.scan_rows) {
+        for (std::size_t row = 0; row < data.shape.rows; row += data.scan_rows) {
+            auto strip_memory = data.context.profile().reserve(BufferKind::scene,data.scan_rows*data.shape.cols*9);
+            auto strip = subset_swath_geometry(geometry,{row,0,{data.scan_rows,data.shape.cols}});
+            auto projected = project_swath(strip,map,data.context);
+            for (std::size_t col = 0; col < data.columns; ++col) {
+                auto& block = data.blocks.at(row/data.block_size*data.columns+col);
+                block.vertices = data.projected.bytes();
+                copy_region<PixelPoint>(projected.vertices.view(),{0,block.window.col,
+                    {block.window.shape.rows+1,block.window.shape.cols+1}},scratch);
+                data.projected.write(output,std::span<const PixelPoint>(scratch));
+            }
+        }
+    } else {
+        auto projected = project_swath(geometry,map,data.context);
+        for (auto& block : data.blocks) {
+            block.vertices = data.projected.bytes();
+            copy_region<PixelPoint>(projected.vertices.view(),{block.window.row,block.window.col,
+                                      {block.window.shape.rows + 1,block.window.shape.cols + 1}},scratch);
+            data.projected.write(output,std::span<const PixelPoint>(scratch));
+        }
     }
     output.close(); data.ready = true; data.geometry.clear();
 }
@@ -173,6 +193,22 @@ SwathRasterSource CachedSwath::source(std::uint64_t order) const {
     result.source_column = impl_->source_window.col; result.source_columns = impl_->source_shape.cols;
     result.block_size = impl_->block_size; result.plane_count = impl_->plane_count;
     result.read_block = [this](Window window) { return impl_->read(window); };
+    return result;
+}
+
+std::vector<SwathRasterSource> CachedSwath::sources(std::uint64_t order) const {
+    if (!impl_->scan_rows) return {source(order)};
+    std::vector<SwathRasterSource> result;
+    for (std::size_t row = 0; row < impl_->shape.rows; row += impl_->scan_rows) {
+        auto strip = source(order+result.size());
+        strip.cells.rows = impl_->scan_rows;
+        strip.read_block = [this,row](Window window) {
+            auto block = impl_->read({row+window.row,window.col,window.shape});
+            block->window = window;
+            return block;
+        };
+        result.push_back(std::move(strip));
+    }
     return result;
 }
 

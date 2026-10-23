@@ -4,6 +4,7 @@
 #include "render_detail.hpp"
 #include "core/navigation.hpp"
 #include "products/phys.hpp"
+#include "products/cache.hpp"
 
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
@@ -324,26 +325,53 @@ void render_swath_products(const Request& request,std::span<const products::Load
     }
     const auto map = plan_map(geometries,request,options.region_already_selected);
     std::vector<ProjectedSwath> projections;
+    std::vector<std::unique_ptr<products::CachedSwath>> caches;
     std::vector<SwathRasterSource> sources;
     projections.reserve(products.size()); sources.reserve(products.size());
     for (std::size_t i = 0; i < products.size(); ++i) {
         const auto& loaded = products[i];
-        projections.push_back(project_swath(*geometries[i],map.view,context));
-        SwathRasterSource source;
-        source.cells = geometries[i]->latitude.shape(); source.vertices = projections.back().vertices.view();
-        source.display = loaded.product.display; source.source_column = loaded.source_window.col;
-        source.source_columns = loaded.source_shape.cols; source.scene_order = i;
-        if (!map.view.projection.orthographic)
-            source.horizontal_period_pixels = 360.*map.view.pixels.cols/(map.view.bounds.right-map.view.bounds.left);
-        for (const auto& plane : loaded.product.frame.planes) {
-            source.planes.push_back(plane.values.view()); source.valid.push_back(plane.valid.view());
+        const auto& geometry = *geometries[i];
+        const auto shape = geometry.latitude.shape();
+        if (options.cache_swaths) {
+            auto cache = std::make_unique<products::CachedSwath>(context.scratch().path()/("render-"+std::to_string(i)),
+                loaded,context,geometry.scan_rows ? geometry.scan_rows : 128);
+            cache->project(map.view);
+            auto strips = cache->sources(sources.size());
+            for (auto& source : strips) {
+                if (!map.view.projection.orthographic)
+                    source.horizontal_period_pixels = 360.*map.view.pixels.cols/(map.view.bounds.right-map.view.bounds.left);
+                sources.push_back(std::move(source));
+            }
+            caches.push_back(std::move(cache));
+            continue;
         }
-        sources.push_back(std::move(source));
+        for (std::size_t row = 0; row < shape.rows;) {
+            const auto rows = geometry.scan_rows ? std::min(shape.rows-row,
+                geometry.scan_rows-(geometry.first_source_row+row)%geometry.scan_rows) : shape.rows;
+            const Window window{row,0,{rows,shape.cols}};
+            if (geometry.scan_rows) {
+                auto strip = subset_swath_geometry(geometry,window);
+                auto memory = context.profile().reserve(BufferKind::scene,rows*shape.cols*9);
+                projections.push_back(project_swath(strip,map.view,context));
+            } else projections.push_back(project_swath(geometry,map.view,context));
+            SwathRasterSource source;
+            source.cells = window.shape; source.vertices = projections.back().vertices.view();
+            source.display = loaded.product.display; source.source_column = loaded.source_window.col;
+            source.source_columns = loaded.source_shape.cols; source.scene_order = sources.size();
+            if (!map.view.projection.orthographic)
+                source.horizontal_period_pixels = 360.*map.view.pixels.cols/(map.view.bounds.right-map.view.bounds.left);
+            for (const auto& plane : loaded.product.frame.planes) {
+                source.planes.push_back(plane.values.view().window(window));
+                source.valid.push_back(plane.valid.view().window(window));
+            }
+            sources.push_back(std::move(source));
+            row += rows;
+        }
     }
     RasterOptions raster_options;
     raster_options.layout = map.layout; raster_options.bit_depth = options.bit_depth;
-    raster_options.exact_coverage = products.size() > 1;
-    if (products.size() > 1) raster_options.overlap = OverlapPolicy::scan_center;
+    raster_options.exact_coverage = sources.size() > 1;
+    if (sources.size() > 1) raster_options.overlap = OverlapPolicy::scan_center;
     auto rendered = rasterize_swaths(sources,raster_options,context);
     save_frame(rendered,map,products.front().product,request,path,context);
 }

@@ -1,6 +1,6 @@
 # pg_EV_image
 
-卫星图像渲染工具，支持 FY3 MERSI、MWRI、PMR、FY4 AGRI/GHI、GIIRS，以及 GOSAT-GW AMSR3 L1B，并提供经纬网与 MERSI 连续轨段拼接。
+卫星图像渲染工具，支持 FY3 MERSI、MWRI、PMR、FY4 AGRI/GHI、GIIRS、GOSAT-GW AMSR3 L1B 和 Metop-SG METimage L1B，并提供经纬网与 MERSI/METimage 连续轨段拼接。
 
 ## 构建
 
@@ -79,6 +79,11 @@ AMSR3 L1B 的 `.nc` 文件包含亮温和定位，无需单独提供 GEO。`W -b
 跨频段合成按实际经纬度对齐；这是可视化位置插值，与官方 L1R 足迹匹配不同。
 完整通道表、质量处理和验证方法见 [AMSR3 支持说明](docs/AMSR3.md)。
 
+METimage 支持 HDF5 原生读取 `.nc`，也可以直接传官方 ZIP，由程序内部解包。
+`R/RMUL -b 0..10` 选择太阳波段，`E -b 11..19` 选择热红外，`RT` 为瑞利真彩色；
+同时支持 `RY`、`RF`、`EC`、`ECT` 和 `TSG`。METimage 拼接每段只需 `data`，
+可直接使用 [ZIP 拼接示例](examples/metimage-mosaic.json)。完整说明见 [METimage](docs/METimage.md)。
+
 拼接相邻 MERSI 轨段：复制 [示例任务](examples/mersi-mosaic.json)，为每段填写真实的数据和 GEO 路径，然后运行：
 
 ```bash
@@ -133,10 +138,13 @@ FY4 经纬网需要圆盘导航，正交投影当前仍用于 MERSI 地图流程
 
 ## 现有产品
 
-MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`ECT`、`EK`、`TSG`。
+MERSI：`E`、`R`、`LL`、`RT`、`RY`、`RF`、`RMUL`、`EC`、`ECT`、`TSG`。
 FY4 AGRI/GHI：`E`、`R`、`Re`、`Rr`、`EC`、`RF`、`RY`、`RX`、`RTpp`、`RTEC`、`RTEC16`、`RTG`、`AGHI_ALD`。
 GIIRS：`R`、`LW`、`MW`、`IRall`。MWRI：`S`、`W`、`W84`、`TCX`、`TCN`、`TCN2`、`TCS`、`TCR`。降水产品：`PMR`。
 AMSR3：`W`、`W84`、`TCX`、`TCS`、`TCR`；不支持需要 53/118 GHz 输入的 `TCN/TCN2`。
+METimage：`R`、`RMUL`、`E`、`RT`、`RY`、`RF`、`EC`、`ECT`、`TSG`。
+
+`EK` 已停止支持，已有兼容实现计划在后续版本移除；METimage 不提供此模式。
 
 GIIRS 的 `LW`、`MW` 使用从 0 开始的光谱通道编号，页脚保留中心波数，亮温单位为 K。
 `IRall` 先输出全部 MW 通道，再输出全部 LW 通道，以 `000000` 起连续编号；每个光谱族共用显示范围，

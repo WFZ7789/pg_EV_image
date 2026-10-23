@@ -32,9 +32,10 @@ if(FY_BUILD_APP)
     find_package(HDF5 REQUIRED COMPONENTS C CXX)
     find_package(OpenCV REQUIRED)
     find_package(CLI11 REQUIRED)
+    find_package(ZLIB REQUIRED)
 
-    add_library(fy_sensors STATIC src/sensors/hdf.cpp)
-    target_link_libraries(fy_sensors PUBLIC fy_core PRIVATE ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
+    add_library(fy_sensors STATIC src/sensors/hdf.cpp src/sensors/input.cpp)
+    target_link_libraries(fy_sensors PUBLIC fy_core PRIVATE ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES} ZLIB::ZLIB)
     target_include_directories(fy_sensors PRIVATE ${HDF5_INCLUDE_DIRS})
 
     add_library(fy_render STATIC src/native_swath.cpp src/render_product.cpp src/inspect.cpp)
@@ -90,6 +91,10 @@ if(BUILD_TESTING)
         target_link_libraries(amsr3_test PRIVATE fy_render ${OpenCV_LIBS} ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
         target_include_directories(amsr3_test PRIVATE ${OpenCV_INCLUDE_DIRS} ${HDF5_INCLUDE_DIRS})
         add_test(NAME amsr3_test COMMAND amsr3_test)
+        add_executable(metimage_test tests/metimage_test.cpp)
+        target_link_libraries(metimage_test PRIVATE fy_render ${HDF5_LIBRARIES} ${HDF5_CXX_LIBRARIES})
+        target_include_directories(metimage_test PRIVATE ${HDF5_INCLUDE_DIRS})
+        add_test(NAME metimage_test COMMAND metimage_test)
         add_executable(new_sensor_test tests/new_sensor_test.cpp)
         target_link_libraries(new_sensor_test PRIVATE fy_render ${OpenCV_LIBS})
         target_include_directories(new_sensor_test PRIVATE ${OpenCV_INCLUDE_DIRS})
@@ -107,6 +112,10 @@ if(BUILD_TESTING)
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/amsr3_cli_test.py
                     --app $<TARGET_FILE:pg_EV_image> --fixture $<TARGET_FILE:amsr3_test>)
             set_tests_properties(amsr3_cli_test PROPERTIES TIMEOUT 120)
+            add_test(NAME metimage_cli_test COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/metimage_cli_test.py
+                    --app $<TARGET_FILE:pg_EV_image> --fixture $<TARGET_FILE:metimage_test>)
+            set_tests_properties(metimage_cli_test PROPERTIES TIMEOUT 120)
             add_test(NAME cli_execution_test COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/cli_execution_test.py
                     --app $<TARGET_FILE:pg_EV_image> --fixture $<TARGET_FILE:cli_fixture>)

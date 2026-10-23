@@ -10,6 +10,7 @@ namespace fy {
 struct ProductRenderOptions {
     int bit_depth = 8;
     bool region_already_selected = false;
+    bool cache_swaths = false;
 };
 
 /// @brief 按已有几何能力成图，不读取载荷名称或执行产品公式。

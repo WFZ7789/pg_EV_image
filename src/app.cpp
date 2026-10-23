@@ -3,6 +3,7 @@
 #include "pipeline.hpp"
 #include "native_swath.hpp"
 #include "sensors/hdf.hpp"
+#include "sensors/input.hpp"
 
 #include <CLI/CLI.hpp>
 #include <opencv2/core.hpp>
@@ -57,7 +58,8 @@ fy::Request load_job(const std::filesystem::path& filename) {
 }
 
 
-int execute(const fy::Request& request) {
+int execute(const fy::Request& original) {
+    auto request = original;
     fy::core::ExecutionContext context(request.execution, "native");
     struct CvThreads {
         int previous = cv::getNumThreads();
@@ -78,6 +80,8 @@ int execute(const fy::Request& request) {
         }
     };
     try {
+        for (auto& input : request.inputs)
+            input.data = fy::sensors::resolve_data_input(input.data,context.scratch());
         if (request.inputs.size() > 1) {
             context.profile().set_scope("native_mosaic");
             auto phase = context.profile().phase("native_render");
@@ -101,7 +105,7 @@ int execute(const fy::Request& request) {
                 fy::render_native_giirs(request,context);
             }
             else {
-                context.profile().set_scope(adapter == "mersi" || adapter == "mwri" || adapter == "pmr" || adapter == "amsr3" ? "native_swath" : "native_scene");
+                context.profile().set_scope(adapter == "mersi" || adapter == "mwri" || adapter == "pmr" || adapter == "amsr3" || adapter == "metimage" ? "native_swath" : "native_scene");
                 auto phase = context.profile().phase("native_render");
                 fy::render_native_scene(request,adapter,context);
             }
@@ -122,7 +126,7 @@ int main(int argc, char** argv) {
     CLI::App app{"风云卫星图像处理"};
     auto* inspect = app.add_subcommand("inspect", "查看输入元数据");
     auto* render = app.add_subcommand("render", "渲染单景产品");
-    auto* mosaic = app.add_subcommand("mosaic", "拼接 FY-3 MERSI 连续轨段");
+    auto* mosaic = app.add_subcommand("mosaic", "拼接 MERSI 或 METimage 连续轨段");
     std::string amsr3_scan = "A";
     std::string inspect_path, data, geo, aux, mode, color, output, projection = "geographic", job;
     int band = 0, width = 0;

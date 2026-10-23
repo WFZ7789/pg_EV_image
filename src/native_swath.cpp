@@ -32,6 +32,72 @@ std::chrono::sys_time<std::chrono::minutes> parse_time(const std::string& key) {
     return std::chrono::sys_days(date) + std::chrono::hours(hour) + std::chrono::minutes(minute);
 }
 
+void render_metimage_mosaic(const Request& request,ExecutionContext& context) {
+    AdapterRegistry registry;
+    sensors::register_hdf_adapters(registry,context.profile());
+    struct Entry { SensorMetadata metadata; SensorSession session; };
+    std::vector<Entry> entries;
+    Shape shape{};
+    for (const auto& input : request.inputs) {
+        auto session = registry.open("metimage",{input.data,input.geo,input.aux});
+        auto metadata = session.metadata();
+        const auto grid = metadata.grid("native").shape;
+        if (!entries.empty() && (grid.cols != shape.cols || metadata.satellite != entries.front().metadata.satellite ||
+            metadata.numeric_attributes.at("orbit") != entries.front().metadata.numeric_attributes.at("orbit")))
+            throw std::invalid_argument("METimage mosaic requires one satellite, orbit and scan width");
+        shape.cols = grid.cols;
+        if (grid.rows > std::numeric_limits<std::size_t>::max()-shape.rows) throw std::overflow_error("METimage mosaic row overflow");
+        shape.rows += grid.rows;
+        entries.push_back({std::move(metadata),std::move(session)});
+    }
+    std::sort(entries.begin(),entries.end(),[](const auto& a,const auto& b) {
+        return a.metadata.observation_begin < b.metadata.observation_begin;
+    });
+    auto metadata = entries.front().metadata;
+    metadata.grids.front().shape = shape;
+    metadata.observation_end = entries.back().metadata.observation_end;
+    metadata.labels[0] = "METimage mosaic: "+std::to_string(entries.size())+" granules";
+    metadata.labels[2] = metadata.observation_begin.substr(11,8)+" - "+
+        (metadata.observation_begin.substr(0,10) == metadata.observation_end.substr(0,10) ?
+         metadata.observation_end.substr(11,8) : metadata.observation_end.substr(0,19))+"(UTC)";
+    const products::ProductRequest product_request{.mode = request.mode,.band = request.band,.color = request.color,
+        .projection = {request.projection == "orthographic",request.center_lat,request.center_lon},.mosaic = true};
+    const auto definition = products::mersi_product(metadata,entries.front().session.bands(),product_request);
+    const auto bytes = shape.elements()*(9+5*definition.plan.inputs.size());
+    products::LoadedInputs combined{context.profile().reserve(BufferKind::scene,bytes),{},nullptr,{0,0,shape},shape};
+    auto geometry = std::make_shared<NativeGeometry>(SwathGeometry{Raster<float>(shape),Raster<float>(shape),
+        Raster<std::uint8_t>(shape),24,0});
+    auto& swath = std::get<SwathGeometry>(*geometry);
+    const auto bands = entries.front().session.bands();
+    for (const auto& input : definition.plan.inputs) {
+        const auto band = std::ranges::find(bands,input.band,&BandDescriptor::id);
+        combined.planes.push_back({band->calibrated_unit,Raster<float>(shape),Raster<std::uint8_t>(shape)});
+    }
+    std::size_t offset = 0;
+    for (auto& entry : entries) {
+        const auto local_definition = products::mersi_product(entry.metadata,entry.session.bands(),product_request);
+        auto inputs = products::load_inputs(entry.session,local_definition,context);
+        const auto& source = std::get<SwathGeometry>(*inputs.geometry);
+        const auto copy = [offset](auto from,auto to) { std::copy(from.begin(),from.end(),to.begin()+offset); };
+        copy(source.latitude.values(),swath.latitude.values()); copy(source.longitude.values(),swath.longitude.values());
+        copy(source.valid.values(),swath.valid.values());
+        for (std::size_t i = 0; i < inputs.planes.size(); ++i) {
+            copy(inputs.planes[i].values.values(),combined.planes[i].values.values());
+            copy(inputs.planes[i].valid.values(),combined.planes[i].valid.values());
+        }
+        offset += source.latitude.shape().elements();
+    }
+    combined.geometry = std::move(geometry);
+    auto loaded = products::prepare_product(std::move(combined),definition,context);
+    products::SharedDisplayStatistics statistics(request.mode,context.profile());
+    statistics.add(loaded.product);
+    if (const auto scale = statistics.scale()) {
+        loaded.product.display.scale = *scale;
+        context.profile().set_shared_display_scale({scale->low,scale->high});
+    }
+    render_product(request,loaded,context,{.cache_swaths = true});
+}
+
 }
 
 void render_native_scene(const Request& request,const std::string& adapter,core::ExecutionContext& context) {
@@ -182,6 +248,9 @@ void render_native_mosaic(const Request& request,ExecutionContext& context) {
     validate_request(request);
     if (request.inputs.size() < 2) throw std::invalid_argument("Mosaic requires at least two scenes");
     const auto path = output_path(request);
+    const auto& first = request.inputs.front();
+    const auto adapter = context.io().run([&] { return sensors::identify_hdf_adapter({first.data,first.geo,first.aux}); });
+    if (adapter == "metimage") { render_metimage_mosaic(request,context); return; }
     AdapterRegistry registry;
     sensors::register_hdf_adapters(registry,context.profile());
     struct Entry {

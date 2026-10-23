@@ -167,6 +167,8 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
                            const ProductRequest& request) {
     const auto& mode = request.mode;
     const auto& satellite = metadata.satellite;
+    const bool metimage = metadata.sensor == "METimage";
+    if (metimage && mode == "EK") throw std::invalid_argument("EK is no longer supported");
     const bool composite_mode = mode == "EC" || mode == "EK" || mode == "ECT";
     const bool quarter = metadata.resolution == "0250M";
     const bool auxiliary = std::ranges::find(metadata.grids,std::string("auxiliary"),&GridDescriptor::id) != metadata.grids.end();
@@ -177,6 +179,8 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
     std::vector<std::string> units;
     std::size_t infrared_index = 2, second_index = 3, zenith_index = 4, azimuth_index = 5;
     if (mode == "E" || mode == "R" || mode == "RMUL") {
+        if (metimage && (request.band < 0 || request.band >= 20 || ((mode == "E") != (request.band >= 11))))
+            throw std::invalid_argument("METimage R/RMUL use bands 0..10; E uses bands 11..19");
         ids = {request.band};
         if (mode != "E") {
             if (mode == "RMUL" && satellite == "FY-3E") throw std::invalid_argument("RMUL is not supported for FY-3E");
@@ -187,16 +191,25 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
         allowed(satellite,{"FY-3E"}); ids = {sensors::low_light}; units = {"radiance"};
     } else if (mode == "TSG") units = {"degree"};
     else if (mode == "RT") {
-        allowed(satellite,{"FY-3D","FY-3F","FY-3H"});
+        if (!metimage) allowed(satellite,{"FY-3D","FY-3F","FY-3H"});
         if (!request.color.empty() && request.color != "linear" && request.color != "srgb" && request.color != "contrast")
             throw std::invalid_argument("RT curve must be linear, srgb or contrast");
-        ids = {1,2,3,sensors::solar_zenith,sensors::solar_azimuth,sensors::satellite_zenith,sensors::satellite_azimuth};
+        ids = {metimage ? 0 : 1,metimage ? 1 : 2,metimage ? 2 : 3,
+               sensors::solar_zenith,sensors::solar_azimuth,sensors::satellite_zenith,sensors::satellite_azimuth};
         units = {"1","1","1"};
     } else if (mode == "RY" || mode == "RF") {
-        allowed(satellite,{"FY-3D","FY-3F","FY-3H","FY-3G"});
+        if (!metimage) allowed(satellite,{"FY-3D","FY-3F","FY-3H","FY-3G"});
         const int red = satellite == "FY-3G" ? 1 : 3;
         ids = {red,red + 1,mode == "RY" ? (satellite == "FY-3G" ? 5 : 6) : (satellite == "FY-3G" ? 7 : 24),sensors::solar_zenith};
+        if (metimage) ids = {2,5,mode == "RY" ? 9 : 17,sensors::solar_zenith};
         units = {"1","1",mode == "RY" ? "1" : "degC"};
+    } else if (composite_mode && metimage) {
+        if (mode == "EC") {
+            ids = {11,18,17,sensors::solar_zenith,sensors::solar_azimuth};
+            second_index = 1; zenith_index = 3; azimuth_index = 4; units = {"1","1","1"};
+        } else {
+            ids = {11,16,17,18,sensors::solar_zenith,sensors::solar_azimuth}; units = {"1","1","1"};
+        }
     } else if (composite_mode) {
         allowed(satellite,mode == "EC" || mode == "ECT" ? std::initializer_list<std::string_view>{"FY-3D","FY-3F","FY-3H","FY-3E","FY-3G"} :
                                            std::initializer_list<std::string_view>{"FY-3D","FY-3F","FY-3H","FY-3E"});
@@ -225,7 +238,7 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
     if (mode == "R" || mode == "RMUL" || mode == "RT" || mode == "RY" || mode == "RF")
         if (!metadata.numeric_attributes.contains("earth_sun_distance_au"))
             throw std::invalid_argument("Reflection product needs EarthSun Distance Ratio");
-    const int shadow_distance = mode == "EC" && auxiliary ? 4 : 1;
+    const int shadow_distance = metimage ? 2 : mode == "EC" && auxiliary ? 4 : 1;
     for (int id : ids) {
         band_at(bands,id);
         plan.inputs.push_back({id,plan.calculation_grid,composite_mode ? 10u * shadow_distance : 0u,
@@ -236,7 +249,7 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
     auto statistic = [&](StatisticsOperation operation,std::string field,float percentile = 99) -> StatisticsSpec& {
         StatisticsSpec spec;
         spec.operation = operation; spec.field = std::move(field); spec.percentile = percentile;
-        spec.include_masked_finite = true;
+        spec.include_masked_finite = !metimage;
         plan.statistics.push_back(std::move(spec));
         return plan.statistics.back();
     };
@@ -273,9 +286,17 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
         statistic(StatisticsOperation::percentile,"black_corrected_visible",96);
     }
     plan.validate(metadata,bands);
-    const auto description = ids.empty() || mode == "RT" || mode == "RF" ? std::string() : band_at(bands,ids.front()).name;
+    auto description = ids.empty() || mode == "RT" || mode == "RF" ? std::string() : band_at(bands,ids.front()).name;
+    if (metimage) {
+        if (mode == "R" || mode == "RMUL" || mode == "E")
+            description = mode+": "+description+" #"+std::to_string(request.band)+(mode == "E" ? " [degC]" : " [reflectance]");
+        else if (mode == "RT") description = "RT: 668 / 555 / 443 nm, Rayleigh";
+        else if (mode == "RY") description = "RY: 1630 / 865 / 668 nm";
+        else if (mode == "RF") description = "RF: 668 / 865 / 10690 nm";
+        else description = mode+": METimage";
+    }
     const auto count = ids.size();
-    result.prepare = [metadata,request,description,count,infrared_index,second_index,zenith_index,azimuth_index,shadow_distance](std::vector<ScalarPlane>&& inputs,
+    result.prepare = [metadata,request,description,count,infrared_index,second_index,zenith_index,azimuth_index,shadow_distance,metimage](std::vector<ScalarPlane>&& inputs,
                     std::shared_ptr<const NativeGeometry> geometry,ExecutionContext& context) {
         if (!geometry) throw std::invalid_argument("Missing product geometry");
         const auto shape = geometry_shape(*geometry);
@@ -283,7 +304,7 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
         auto phase = context.profile().phase("product");
         PreparedProduct output;
         output.frame.name = request.mode; output.frame.geometry = geometry;
-        output.labels = labels(metadata,description,true);
+        output.labels = labels(metadata,description,!metimage);
         const auto& mode = request.mode;
         if (mode == "TSG") {
             const auto& positions = std::get<SwathGeometry>(*geometry);
@@ -313,9 +334,10 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
             const auto solar_index = mode == "RT" ? 3 : inputs.size() - 1;
             const auto reflection_count = mode == "RF" ? 2 : solar_index;
             for (std::size_t i = 0; i < reflection_count; ++i)
-                solar_correct(inputs[i],inputs[solar_index],metadata.numeric_attributes.at("earth_sun_distance_au"),context);
+                solar_correct(inputs[i],inputs[solar_index],metimage ? 1 : metadata.numeric_attributes.at("earth_sun_distance_au"),context);
             if (mode == "RT")
-                correct_rayleigh(std::span(inputs).first(3),inputs[3],inputs[4],inputs[5],inputs[6],context);
+                correct_rayleigh(std::span(inputs).first(3),inputs[3],inputs[4],inputs[5],inputs[6],context,
+                    metimage ? std::array<double,3>{0.443,0.555,0.668} : std::array<double,3>{0.470,0.550,0.650});
             inputs.resize(solar_index);
             if (mode == "R") output.display = scalar_display(request.color,palette::color_enhanced_vis,{0,2});
             else if (mode == "RF") {
@@ -380,13 +402,15 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
         } else {
             for (std::size_t i = 0; i < zenith_index; ++i) celsius(inputs[i],context);
             auto workspace = context.profile().reserve(BufferKind::statistics,shape.elements() * 2 * (sizeof(float) + sizeof(std::uint8_t)));
-            auto shade = shadow(inputs[infrared_index],inputs[zenith_index],inputs[azimuth_index],context,shadow_distance);
+            const auto* swath = std::get_if<SwathGeometry>(geometry.get());
+            auto shade = shadow(inputs[infrared_index],inputs[zenith_index],inputs[azimuth_index],context,shadow_distance,
+                metimage && swath ? swath->scan_rows : 0,metimage && swath ? swath->first_source_row : 0);
             if (mode == "ECT") {
                 /// @note 亮度只由亮温决定；雾与卷云只旋转色相，等亮度混合避免温度误读。
                 const auto& palette = moon_palette();
                 const auto fog = to_linear(0x2fbfa8u), cirrus_tint = to_linear(0xa78bdcu);
                 const float fog_luminance = luminance(fog), cirrus_luminance = luminance(cirrus_tint);
-                const bool cirrus_supported = metadata.satellite == "FY-3D" || metadata.satellite == "FY-3E";
+                const bool cirrus_supported = metimage || metadata.satellite == "FY-3D" || metadata.satellite == "FY-3E";
                 /// @note 3.8-10.8 的绝对量级随定标与场景漂移，雾门限取夜间像元中位数加偏置。
                 constexpr float histogram_low = -30.0f, histogram_step = 0.2f;
                 constexpr std::size_t histogram_bins = 400;
@@ -410,13 +434,14 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
                     }
                 }
                 /// @note 3.8 μm 通道存在单像元级缺测，先补洞再合成，避免画面上出现黑色斜纹。
-                fill_small_gaps(inputs[0],context,2,2);
+                if (!metimage) fill_small_gaps(inputs[0],context,2,2);
                 context.parallel_rows(shape.rows,[&](std::size_t begin,std::size_t end) {
                     for (auto i = begin * shape.cols; i < end * shape.cols; ++i) {
                         const float middle = inputs[0].values.values()[i], reference = inputs[1].values.values()[i];
                         const float infrared = inputs[infrared_index].values.values()[i];
                         const float zenith = inputs[zenith_index].values.values()[i];
-                        const bool valid = shade.valid.values()[i] && inputs[0].valid.values()[i] && inputs[1].valid.values()[i] &&
+                        const bool middle_needed = !metimage || (zenith > 88 && infrared > -45);
+                        const bool valid = shade.valid.values()[i] && (!middle_needed || inputs[0].valid.values()[i]) && inputs[1].valid.values()[i] &&
                                            inputs[infrared_index].valid.values()[i] && inputs[second_index].valid.values()[i] &&
                                            std::isfinite(infrared);
                         float red = NAN, green = NAN, blue = NAN;
@@ -429,7 +454,8 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
                                                      std::lerp(low_color.green,high_color.green,fraction),
                                                      std::lerp(low_color.blue,high_color.blue,fraction)};
                             const float brightness = luminance(color);
-                            const float fog_weight = 0.65f * smooth_step(baseline + 3.0f,baseline + 6.0f,middle - infrared) *
+                            const float fog_weight = metimage && !middle_needed ? 0 :
+                                0.65f * smooth_step(baseline + 3.0f,baseline + 6.0f,middle - infrared) *
                                                      smooth_step(88.0f,92.0f,zenith) * smooth_step(-45.0f,-30.0f,infrared);
                             if (fog_weight > 0)
                                 color = mix_equal_luminance(color,brightness,fog,fog_luminance,fog_weight);

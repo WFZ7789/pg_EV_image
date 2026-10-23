@@ -107,7 +107,7 @@ inline std::vector<std::string> labels(const SensorMetadata& metadata, const std
 }
 
 inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zenith, const ScalarPlane& azimuth,
-                    ExecutionContext& context, int pixel_distance = 1) {
+                    ExecutionContext& context, int pixel_distance = 1,std::size_t scan_rows = 0,std::size_t first_row = 0) {
     const auto shape = temperature.values.shape();
     double average_zenith = 0, average_azimuth = 0, count = 0;
     for (std::size_t i = 0; i < shape.elements(); ++i)
@@ -133,9 +133,11 @@ inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zen
                     const int dx = static_cast<int>(std::cos(angle) * scale * pixel_distance);
                     const int dy = static_cast<int>(std::sin(angle) * scale * pixel_distance);
                     const auto r = static_cast<std::int64_t>(row) + dy, c = static_cast<std::int64_t>(col) + dx;
-                    float shifted = 0;
+                    float shifted = scan_rows ? temperature.values.values()[index] : 0;
                     if (r >= 0 && c >= 0 && r < static_cast<std::int64_t>(shape.rows) && c < static_cast<std::int64_t>(shape.cols)) {
                         const auto neighbor = static_cast<std::size_t>(r) * shape.cols + static_cast<std::size_t>(c);
+                        if (scan_rows && ((first_row+row)/scan_rows != (first_row+std::size_t(r))/scan_rows ||
+                            !temperature.valid.values()[neighbor])) continue;
                         valid = valid && temperature.valid.values()[neighbor];
                         shifted = temperature.values.values()[neighbor];
                     }

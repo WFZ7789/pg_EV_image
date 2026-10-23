@@ -2,6 +2,7 @@
 
 #include "sensors/hdf.hpp"
 #include "sensors/amsr3.hpp"
+#include "sensors/metimage.hpp"
 #include "products/config.hpp"
 
 #include <H5Cpp.h>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <regex>
 #include <set>
+#include <numbers>
 
 namespace fy::sensors {
 namespace {
@@ -864,6 +866,244 @@ private:
 };
 
 
+class MetimageAdapter final : public SensorAdapter {
+public:
+    MetimageAdapter(const SourceFiles& sources,std::optional<ProfileReport> report)
+        : access_{std::move(report)},file_(sources.data.string(),H5F_ACC_RDONLY) {
+        const auto root = file_.openGroup("/");
+        const auto spacecraft = access_.text(root,"spacecraft");
+        if (access_.text(root,"instrument") != "VII" || access_.text(root,"product_level") != "1B" ||
+            access_.text(root,"type") != "RAD" || !spacecraft.starts_with("SGA"))
+            throw std::invalid_argument("METimage requires Metop-SG VII L1B radiances");
+        if (!sources.geolocation.empty() || !sources.auxiliary.empty())
+            throw std::invalid_argument("METimage contains its own geolocation and calibration");
+        metadata_.satellite = "Metop-SG "+spacecraft.substr(2);
+        metadata_.sensor = "METimage"; metadata_.resolution = "0500M";
+        metadata_.observation_begin = timestamp(access_.text(root,"sensing_start_time_utc"));
+        metadata_.observation_end = timestamp(access_.text(root,"sensing_end_time_utc"));
+        metadata_.labels = {access_.text(root,"product_name"),metadata_.observation_begin.substr(0,10),
+            metadata_.observation_begin.substr(11,8)+"(UTC)",metadata_.satellite+" METimage",""};
+        const auto dims = Access::dimensions(dataset(measurement+"vii_443"));
+        shape_ = {dims.at(0),dims.at(1)};
+        metadata_.grids.push_back({.id = "native",.shape = shape_});
+        const auto mask_shape = Access::dimensions(dataset(processing+"pixel_duplication_mask"));
+        scan_rows_ = mask_shape.at(0);
+        if (scan_rows_ != 24 || shape_.rows % scan_rows_ || mask_shape.at(1) != shape_.cols)
+            throw std::invalid_argument("Invalid METimage scan raster");
+        const auto scans = shape_.rows/scan_rows_;
+        data_quality_ = all(quality+"data_quality");
+        calibration_quality_ = all(quality+"calibration_quality");
+        geolocation_quality_ = all(quality+"geolocation_quality");
+        processing_quality_ = all(processing+"vii_processing_flag");
+        duplication_ = all(processing+"pixel_duplication_mask");
+        performance_ = all(processing+"pixel_performance_mask");
+        if (data_quality_.size() != scans*20 || calibration_quality_.size() != scans*20 ||
+            processing_quality_.size() != scans*20 || geolocation_quality_.size() != scans ||
+            performance_.size() != 20*scan_rows_)
+            throw std::invalid_argument("Invalid METimage quality dimensions");
+        double distance = 0;
+        dataset("/status/satellite/earth_sun_distance_ratio").read(&distance,H5::PredType::NATIVE_DOUBLE);
+        if (!std::isfinite(distance) || distance <= 0) throw std::invalid_argument("Invalid METimage Earth-Sun distance");
+        metadata_.numeric_attributes["earth_sun_distance_au"] = distance;
+        metadata_.numeric_attributes["orbit"] = scalar(root,"orbit_start");
+        const auto irradiance = all(calibration+"band_averaged_solar_irradiance");
+        const auto wavelengths = all(calibration+"channel_cw_thermal");
+        const auto a = all(calibration+"bt_conversion_a"),b = all(calibration+"bt_conversion_b");
+        if (irradiance.size() != 11 || wavelengths.size() != 9 || a.size() != 9 || b.size() != 9)
+            throw std::invalid_argument("Invalid METimage conversion tables");
+        for (std::size_t id = 0; id < metimage_channels.size(); ++id) {
+            const auto path = measurement+"vii_"+std::string(metimage_channels[id]);
+            auto& data = dataset(path);
+            if (Access::dimensions(data) != dims) throw std::invalid_argument("METimage channel shape mismatch");
+            BandDescriptor band;
+            band.id = int(id); band.name = std::string(metimage_channels[id])+" nm";
+            band.dataset = path; band.grid = "native"; band.unit = "DN";
+            band.fill_values = access_.fills(data);
+            band.valid_range = std::array<double,2>{scalar(data,"valid_min"),scalar(data,"valid_max")};
+            const auto scale = scalar(data,"scale_factor"),offset = scalar(data,"add_offset");
+            band.calibration.provenance = path+"; METimage PFS v5A Eq.13/14";
+            if (id < 11) {
+                if (!(irradiance[id] > 0)) throw std::invalid_argument("Invalid METimage solar irradiance");
+                const double factor = std::numbers::pi*distance*distance/irradiance[id];
+                band.calibrated_unit = "1"; band.calibration.kind = CalibrationKind::linear;
+                band.calibration.coefficients = {scale*factor,offset*factor};
+            } else {
+                band.calibrated_unit = "K"; band.calibration.kind = CalibrationKind::planck_wavelength;
+                band.calibration.coefficients = {scale,offset,wavelengths[id-11],a[id-11],b[id-11]};
+            }
+            bands_.push_back(std::move(band));
+        }
+        for (const auto& [id,name] : angle_names()) {
+            BandDescriptor band;
+            band.id = id; band.name = name; band.dataset = measurement+name; band.grid = "native";
+            band.unit = band.calibrated_unit = "degree";
+            bands_.push_back(std::move(band));
+        }
+        for (const auto& name : {"latitude","longitude","solar_zenith","solar_azimuth","observation_zenith","observation_azimuth"})
+            ties_.emplace(name,packed(measurement+name));
+        const auto tie_dims = Access::dimensions(dataset(measurement+"latitude"));
+        tie_columns_ = tie_dims.at(1);
+        if (tie_dims.at(0) != scans*4 || (tie_columns_-1)*8 != shape_.cols)
+            throw std::invalid_argument("Invalid METimage tie point raster");
+        const auto& lat = ties_.at("latitude"); const auto& lon = ties_.at("longitude");
+        cartesian_.resize(lat.values.size());
+        for (std::size_t i = 0; i < lat.values.size(); ++i) {
+            const double phi = lat.values[i]*radians,lambda = lon.values[i]*radians;
+            const double n = earth_a/std::sqrt(1-eccentricity2*std::sin(phi)*std::sin(phi));
+            cartesian_[i] = {n*std::cos(phi)*std::cos(lambda),n*std::cos(phi)*std::sin(lambda),
+                             n*(1-eccentricity2)*std::sin(phi)};
+        }
+        metadata_.validate();
+    }
+
+    SensorMetadata metadata() const override { return metadata_; }
+    std::vector<BandDescriptor> bands() const override { return bands_; }
+    std::size_t preferred_block_rows(int,Window window) override { return std::min<std::size_t>(window.shape.rows,192); }
+
+    SampleBlock read_window(int id,Window window) override {
+        window.validate(shape_);
+        if (id < 0) {
+            const auto names = angle_names();
+            const auto found = std::ranges::find(names,id,&std::pair<int,std::string>::first);
+            if (found == names.end()) throw std::invalid_argument("Unknown METimage angle");
+            const auto& field = ties_.at(found->second);
+            Raster<float> values(window.shape); Raster<std::uint8_t> valid(window.shape);
+            const bool cyclic = id == solar_azimuth || id == satellite_azimuth;
+            for (std::size_t row = 0; row < window.shape.rows; ++row)
+                for (std::size_t col = 0; col < window.shape.cols; ++col) {
+                    const auto i = row*window.shape.cols+col,source_row = window.row+row;
+                    const auto weights = support(source_row,window.col+col);
+                    bool good = !(unsigned(geolocation_quality_[source_row/scan_rows_]) &
+                        (id == solar_zenith || id == solar_azimuth ? 0x4f : 0x47));
+                    double value = 0,sine = 0,cosine = 0;
+                    for (const auto& [index,weight] : weights) {
+                        if (weight == 0) continue;
+                        good = good && field.valid[index];
+                        value += field.values[index]*weight;
+                        if (cyclic) {
+                            sine += std::sin(field.values[index]*radians)*weight;
+                            cosine += std::cos(field.values[index]*radians)*weight;
+                        }
+                    }
+                    if (cyclic) { value = std::atan2(sine,cosine)/radians; if (value < 0) value += 360; }
+                    valid.values()[i] = good && std::isfinite(value);
+                    values.values()[i] = valid.values()[i] ? float(value) : NAN;
+                }
+            return {id,window,std::move(values),std::move(valid)};
+        }
+        const auto& band = bands_.at(id);
+        const hsize_t origin[]{window.row,window.col},count[]{window.shape.rows,window.shape.cols};
+        auto raw = access_.read(dataset(band.dataset),origin,count);
+        Raster<std::uint8_t> valid(window.shape);
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            const auto row = window.row+i/window.shape.cols,col = window.col+i%window.shape.cols;
+            const auto scan = row/scan_rows_,detector = row%scan_rows_,q = scan*20+std::size_t(id);
+            valid.values()[i] = std::isfinite(raw[i]) && !filled(raw[i],band.fill_values) &&
+                raw[i] >= (*band.valid_range)[0] && raw[i] <= (*band.valid_range)[1] &&
+                !(unsigned(data_quality_[q]) & 0x15) && !(unsigned(processing_quality_[q]) & 1) &&
+                !(unsigned(geolocation_quality_[scan]) & 0x57) &&
+                (id >= 11 || !(unsigned(calibration_quality_[q]) & 0x30)) &&
+                duplication_[detector*shape_.cols+col] != 1 && performance_[id*scan_rows_+detector] == 0;
+        }
+        return {id,window,Raster<float>(window.shape,std::move(raw)),std::move(valid)};
+    }
+
+    NativeGeometry read_geometry(const std::string& grid,Window window) override {
+        if (grid != "native") throw std::invalid_argument("Unknown METimage grid");
+        window.validate(shape_);
+        const hsize_t origin[]{window.row,window.col},count[]{window.shape.rows,window.shape.cols};
+        const auto north = packed(measurement+"delta_lat_N_dem",origin,count);
+        const auto east = packed(measurement+"delta_lon_E_dem",origin,count);
+        const auto& lat = ties_.at("latitude"); const auto& lon = ties_.at("longitude");
+        SwathGeometry result{Raster<float>(window.shape),Raster<float>(window.shape),Raster<std::uint8_t>(window.shape),
+                             scan_rows_,window.row};
+        for (std::size_t row = 0; row < window.shape.rows; ++row)
+            for (std::size_t col = 0; col < window.shape.cols; ++col) {
+                const auto i = row*window.shape.cols+col,source_row = window.row+row;
+                bool good = north.valid[i] && east.valid[i] && !(unsigned(geolocation_quality_[source_row/scan_rows_]) & 0x57);
+                std::array<double,3> xyz{};
+                for (const auto& [index,weight] : support(source_row,window.col+col)) {
+                    if (weight == 0) continue;
+                    good = good && lat.valid[index] && lon.valid[index];
+                    for (std::size_t axis = 0; axis < 3; ++axis) xyz[axis] += cartesian_[index][axis]*weight;
+                }
+                const auto [x,y,z] = xyz;
+                const double p = std::hypot(x,y),theta = std::atan2(z*earth_a,p*earth_b);
+                const double phi = std::atan2(z+second_eccentricity2*earth_b*std::pow(std::sin(theta),3),
+                    p-eccentricity2*earth_a*std::pow(std::cos(theta),3));
+                const double latitude = (phi+north.values[i]/6371000.)/radians;
+                const double longitude = std::remainder((std::atan2(y,x)+east.values[i]/(6371000.*std::cos(phi)))/radians,360.);
+                good = good && std::isfinite(latitude) && std::abs(latitude) <= 90 && std::isfinite(longitude);
+                result.valid.values()[i] = good;
+                result.latitude.values()[i] = good ? float(latitude) : NAN;
+                result.longitude.values()[i] = good ? float(longitude) : NAN;
+            }
+        return result;
+    }
+
+private:
+    struct Packed { std::vector<double> values; std::vector<std::uint8_t> valid; };
+    static constexpr double radians = std::numbers::pi/180.,earth_a = 6378137.,earth_b = 6356752.314245;
+    static constexpr double eccentricity2 = 1-earth_b*earth_b/(earth_a*earth_a);
+    static constexpr double second_eccentricity2 = (earth_a*earth_a-earth_b*earth_b)/(earth_b*earth_b);
+    inline static const std::string measurement = "/data/measurement_data/",calibration = "/data/calibration_data/",
+        quality = "/data/quality_information/",processing = "/data/processing_flags/";
+    Access access_;
+    H5::H5File file_;
+    SensorMetadata metadata_;
+    Shape shape_;
+    std::size_t scan_rows_ = 24,tie_columns_ = 0;
+    std::vector<BandDescriptor> bands_;
+    std::map<std::string,H5::DataSet> datasets_;
+    std::map<std::string,Packed> ties_;
+    std::vector<std::array<double,3>> cartesian_;
+    std::vector<float> data_quality_,calibration_quality_,geolocation_quality_,processing_quality_,duplication_,performance_;
+
+    static std::array<std::pair<int,std::string>,4> angle_names() {
+        return {{{solar_zenith,"solar_zenith"},{solar_azimuth,"solar_azimuth"},
+                 {satellite_zenith,"observation_zenith"},{satellite_azimuth,"observation_azimuth"}}};
+    }
+    static std::string timestamp(std::string value) {
+        if (value.size() < 19) throw std::invalid_argument("Invalid METimage timestamp");
+        value[10] = 'T'; if (!value.ends_with('Z')) value += 'Z'; return value;
+    }
+    H5::DataSet& dataset(const std::string& path) {
+        auto found = datasets_.find(path);
+        if (found == datasets_.end()) found = datasets_.emplace(path,file_.openDataSet(path)).first;
+        return found->second;
+    }
+    double scalar(const H5::H5Object& object,const std::string& key) const {
+        const auto values = access_.attribute(object,key);
+        if (values.size() != 1 || !std::isfinite(values[0])) throw std::invalid_argument("Invalid METimage attribute: "+key);
+        return values[0];
+    }
+    std::vector<float> all(const std::string& path) {
+        auto& data = dataset(path);
+        const auto dims = Access::dimensions(data);
+        const std::vector<hsize_t> origin(dims.size(),0);
+        return access_.read(data,origin,dims);
+    }
+    Packed packed(const std::string& path,std::span<const hsize_t> origin = {},std::span<const hsize_t> count = {}) {
+        auto& data = dataset(path);
+        const auto raw = count.empty() ? all(path) : access_.read(data,origin,count);
+        const auto scale = scalar(data,"scale_factor"),offset = scalar(data,"add_offset");
+        const auto low = scalar(data,"valid_min"),high = scalar(data,"valid_max");
+        const auto fills = access_.fills(data);
+        Packed result{std::vector<double>(raw.size()),std::vector<std::uint8_t>(raw.size())};
+        for (std::size_t i = 0; i < raw.size(); ++i) {
+            result.valid[i] = std::isfinite(raw[i]) && !filled(raw[i],fills) && raw[i] >= low && raw[i] <= high;
+            result.values[i] = result.valid[i] ? double(raw[i])*scale+offset : NAN;
+        }
+        return result;
+    }
+    std::array<std::pair<std::size_t,double>,4> support(std::size_t row,std::size_t col) const {
+        const auto top = (row/scan_rows_*4+row%scan_rows_/8)*tie_columns_+col/8;
+        const double fy = double(row%8)/8,fx = double(col%8)/8;
+        return {{{top,(1-fy)*(1-fx)},{top+1,(1-fy)*fx},
+                 {top+tie_columns_,fy*(1-fx)},{top+tie_columns_+1,fy*fx}}};
+    }
+};
+
 class Amsr3Adapter final : public SensorAdapter {
 public:
     Amsr3Adapter(const SourceFiles& sources,std::optional<ProfileReport> report)
@@ -993,6 +1233,8 @@ HdfSummary read_hdf_summary(const std::filesystem::path& path) try {
     H5::H5File data(path.string(),H5F_ACC_RDONLY);
     const auto root = data.openGroup("/");
     const Access access{};
+    if (access.text(root,"instrument",false) == "VII")
+        return {"Metop-SG "+access.text(root,"spacecraft").substr(2),"METimage",access.text(root,"product_name")};
     if (access.text(root,"SensorShortName",false) == "AMSR3")
         return {access.text(root,"PlatformShortName"),"AMSR3",access.text(root,"ProductName")};
     HdfSummary result{access.text(root,"Satellite Name"),access.text(root,"Sensor Identification Code",false),
@@ -1009,6 +1251,8 @@ std::string identify_hdf_adapter(const core::SourceFiles& sources) try {
     H5::H5File data(sources.data.string(),H5F_ACC_RDONLY);
     const auto root = data.openGroup("/");
     const Access access{};
+    if (access.text(root,"instrument",false) == "VII" && access.text(root,"product_level",false) == "1B" &&
+        access.text(root,"type",false) == "RAD" && Access::exists(data,"/data/measurement_data/vii_443")) return "metimage";
     if (access.text(root,"SensorShortName",false) == "AMSR3" &&
         access.text(root,"PlatformShortName",false) == "GOSAT-GW" &&
         access.text(root,"processing_level",false) == "Level1B" && Access::exists(data,"Tb_Ch89AV")) return "amsr3";
@@ -1036,6 +1280,10 @@ std::string identify_hdf_adapter(const core::SourceFiles& sources) try {
 }
 
 void register_hdf_adapters(core::AdapterRegistry& registry, std::optional<core::ProfileReport> report) {
+    registry.add("metimage",[report](const core::SourceFiles& sources) -> std::unique_ptr<core::SensorAdapter> {
+        try { return std::make_unique<MetimageAdapter>(sources,report); }
+        catch (const H5::Exception& error) { throw std::runtime_error("METimage adapter: "+error.getDetailMsg()); }
+    });
     registry.add("amsr3",[report](const core::SourceFiles& sources) -> std::unique_ptr<core::SensorAdapter> {
         try { return std::make_unique<Amsr3Adapter>(sources,report); }
         catch (const H5::Exception& error) { throw std::runtime_error("AMSR3 adapter open: "+error.getDetailMsg()); }

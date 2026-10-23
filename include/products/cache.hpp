@@ -20,6 +20,7 @@ public:
     const std::string& extra_label() const;
     void project(const core::MapView& map);
     core::SwathRasterSource source(std::uint64_t order) const;
+    std::vector<core::SwathRasterSource> sources(std::uint64_t order) const;
 
 private:
     struct Impl;

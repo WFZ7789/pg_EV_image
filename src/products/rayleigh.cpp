@@ -61,7 +61,8 @@ double rayleigh_path_reflectance(double tau,double mus,double muv,double azimuth
 
 void correct_rayleigh(std::span<core::ScalarPlane> bgr,const core::ScalarPlane& sunz,
                       const core::ScalarPlane& suna,const core::ScalarPlane& satz,
-                      const core::ScalarPlane& sata,core::ExecutionContext& context) {
+                      const core::ScalarPlane& sata,core::ExecutionContext& context,
+                      std::array<double,3> wavelengths_um) {
     if (bgr.size() != 3) throw std::invalid_argument("Rayleigh correction needs B/G/R planes");
     const auto shape = bgr[0].values.shape();
     for (const auto& plane : bgr)
@@ -72,7 +73,8 @@ void correct_rayleigh(std::span<core::ScalarPlane> bgr,const core::ScalarPlane& 
         if (angle->values.shape() != shape || angle->valid.shape() != shape || angle->unit != "degree")
             throw std::invalid_argument("Rayleigh geometry must contain matching degree planes");
     auto phase = context.profile().phase("rayleigh");
-    const std::array<double,3> tau{rayleigh_optical_depth(0.470),rayleigh_optical_depth(0.550),rayleigh_optical_depth(0.650)};
+    const std::array<double,3> tau{rayleigh_optical_depth(wavelengths_um[0]),rayleigh_optical_depth(wavelengths_um[1]),
+                                   rayleigh_optical_depth(wavelengths_um[2])};
     const std::array<double,3> log_tau{std::log(tau[0]),std::log(tau[1]),std::log(tau[2])};
     context.parallel_rows(shape.rows,[&](std::size_t begin,std::size_t end) {
         for (auto i = begin * shape.cols; i < end * shape.cols; ++i) {

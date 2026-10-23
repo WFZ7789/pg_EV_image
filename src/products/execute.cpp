@@ -73,7 +73,7 @@ Raster<T> copy_window(const Raster<T>& source,Window window) {
 
 }
 
-LoadedProduct load_product(SensorSession& session,const ProductDefinition& definition,ExecutionContext& context,
+LoadedInputs load_inputs(SensorSession& session,const ProductDefinition& definition,ExecutionContext& context,
                                  std::optional<GeographicRegion> region,ProductLoadCache* shared_cache) {
     const auto metadata = session.metadata();
     const auto bands = session.bands();
@@ -123,7 +123,7 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
         shape = target_window.shape;
         auto cropped_memory = context.profile().reserve(BufferKind::scene,storage_bytes(shape,9));
         SwathGeometry cropped{copy_window(swath.latitude,target_window),copy_window(swath.longitude,target_window),
-                              copy_window(swath.valid,target_window)};
+                              copy_window(swath.valid,target_window),swath.scan_rows,swath.first_source_row+target_window.row};
         if (definition.plan.clip_to_region)
             for (std::size_t i = 0; i < shape.elements(); ++i)
                 cropped.valid.values()[i] = cropped.valid.values()[i] &&
@@ -180,6 +180,20 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
             inputs.push_back(std::move(plane));
         }
     }
+    if (const auto* swath = std::get_if<SwathGeometry>(geometry.get()); swath && swath->scan_rows)
+        for (auto& plane : inputs)
+            for (std::size_t i = 0; i < shape.elements(); ++i)
+                if (!swath->valid.values()[i]) { plane.valid.values()[i] = 0; plane.values.values()[i] = NAN; }
+    return {std::move(memory),std::move(inputs),std::move(geometry),target_window,full_shape};
+}
+
+LoadedProduct prepare_product(LoadedInputs&& loaded,const ProductDefinition& definition,ExecutionContext& context) {
+    auto& inputs = loaded.planes;
+    auto& geometry = loaded.geometry;
+    auto& memory = loaded.memory;
+    const auto shape = geometry_shape(*geometry);
+    std::uint64_t owned_bytes = geometry_bytes(*geometry);
+    for (const auto& plane : inputs) owned_bytes += plane.values.bytes()+plane.valid.bytes();
     const auto output_planes = definition.plan.frames.front().units.size();
     if (output_planes > inputs.size()) memory.resize(owned_bytes + storage_bytes(shape,(output_planes - inputs.size()) * 5));
     auto product = definition.prepare(std::move(inputs),geometry,context);
@@ -188,7 +202,12 @@ LoadedProduct load_product(SensorSession& session,const ProductDefinition& defin
     for (const auto& plane : product.frame.planes) result_bytes += plane.values.bytes() + plane.valid.bytes();
     memory.resize(result_bytes);
     context.profile().set_source_pixels(shape.elements());
-    return {std::move(memory),std::move(product),target_window,full_shape};
+    return {std::move(memory),std::move(product),loaded.source_window,loaded.source_shape};
+}
+
+LoadedProduct load_product(SensorSession& session,const ProductDefinition& definition,ExecutionContext& context,
+                          std::optional<GeographicRegion> region,ProductLoadCache* shared_cache) {
+    return prepare_product(load_inputs(session,definition,context,region,shared_cache),definition,context);
 }
 
 }

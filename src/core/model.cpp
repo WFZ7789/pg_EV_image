@@ -77,6 +77,19 @@ void SwathGeometry::validate() const {
         }
 }
 
+SwathGeometry subset_swath_geometry(const SwathGeometry& geometry,Window window) {
+    window.validate(geometry.latitude.shape());
+    SwathGeometry result{Raster<float>(window.shape),Raster<float>(window.shape),Raster<std::uint8_t>(window.shape),
+                         geometry.scan_rows,geometry.first_source_row+window.row};
+    for (std::size_t row = 0; row < window.shape.rows; ++row) {
+        const auto source = (window.row+row)*geometry.latitude.shape().cols+window.col,target = row*window.shape.cols;
+        std::copy_n(geometry.latitude.values().begin()+source,window.shape.cols,result.latitude.values().begin()+target);
+        std::copy_n(geometry.longitude.values().begin()+source,window.shape.cols,result.longitude.values().begin()+target);
+        std::copy_n(geometry.valid.values().begin()+source,window.shape.cols,result.valid.values().begin()+target);
+    }
+    return result;
+}
+
 void NativeDiskGeometry::validate() const {
     if (!shape.elements() || !std::isfinite(longitude_deg) ||
         !std::isfinite(equatorial_radius_m) || equatorial_radius_m <= 0 ||

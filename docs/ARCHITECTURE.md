@@ -7,8 +7,12 @@ oneTBB 执行上下文及性能报告。使用 `-DFY_BUILD_APP=OFF` 可仅构建
 核心提供双缓冲定标、定位重采样、圆盘导航，以及扫描带和规则图像网格的面积覆盖栅格器。
 AMSR3 L1B 通过独立的 `Amsr3Adapter` 接入同一注册表与 I/O 通道，直接读取 NetCDF4 的
 HDF5 数据集；产品以 `amsr3` 注册，无需 NetCDF 库。详情见 [AMSR3 支持说明](AMSR3.md)。
+METimage 以 `metimage` 注册，`MetimageAdapter` 同样直接读取 NetCDF4 的 HDF5 数据集；
+`sensors/input.hpp` 使用 ZLIB 将 ZIP 中的 NetCDF 解码到任务 scratch，入口统一处理输入路径。
+产品复用现有光学/红外计算与显示公式，通道映射、按波长定标和瑞利波长按 METimage 设置。
+详见 [METimage 支持说明](METimage.md)。
 `fy_products` 实现上述载荷的产品依赖与显示策略，`src/native_swath.cpp` 编排这些载荷的
-单景 `render` 和 MERSI `mosaic`。`src/render_product.cpp` 按几何能力完成投影、最终尺寸
+单景 `render` 和 MERSI/METimage `mosaic`。`src/render_product.cpp` 按几何能力完成投影、最终尺寸
 栅格化、版式与编码；读取和产品公式独立于这一通用入口。
 `fy_render` 只包含原生成图与检查命令，应用通过 CLI11 接收请求。
 HDF5 会话、入口探测与 `inspect` 元数据读取均在同一 I/O 通道执行，计算通过 oneTBB；
@@ -17,7 +21,7 @@ OpenCV 用于任务 JSON 读取、标注、经纬网和编码，不进入公共�
 功能、架构与正式测量已完成；成本分解和已知性能回退见[性能报告](REFACTOR_V2_PERFORMANCE.md)。
 
 程序入口位于 `src/app.cpp`：`inspect` 读取元数据，`render` 处理单景，`mosaic` 从 JSON
-任务读取 MERSI 数据/GEO 配对。JSON 相对路径以任务文件所在目录为基准。
+任务读取 MERSI 数据/GEO 配对或 METimage 主文件。JSON 相对路径以任务文件所在目录为基准。
 
 `include/core/raster.hpp` 和 `include/core/model.hpp` 提供原生栅格与物理产品帧。
 产品可依既有统计口径保留带无效掩膜的有限数值，但这些样本不能参与绘制；默认定标和
@@ -31,7 +35,7 @@ OpenCV 用于任务 JSON 读取、标注、经纬网和编码，不进入公共�
 扫描中心的有效像元，时间和输入路径决定平局顺序。
 经纬网默认关闭；单景命令通过 `--grid`、拼接任务通过 `map.grid: 1` 开启。
 
-全部已知载荷单景和 MERSI 拼接均经原生路径成图，错误直接返回。
+全部已知载荷单景和 MERSI/METimage 拼接均经原生路径成图，错误直接返回。
 旧 `src/mersi.cpp`、`src/pipeline.cpp`、`src/legacy.cpp`、bridge、必需 RGB 帧、TLS 捕获及
 `include/legacy/` 已删除，正式目标和默认测试不编译旧路径。
 `include/pipeline.hpp` 仅保留标准库任务参数和检查命令声明；`src/inspect.cpp` 经传感器层查询元数据。

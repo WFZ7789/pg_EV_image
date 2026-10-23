@@ -18,7 +18,7 @@ namespace fy::core {
 
 enum class SourceRole { data, geolocation, auxiliary };
 enum class ChannelAxis { none, first, middle, last };
-enum class CalibrationKind { identity, linear, polynomial, lookup, physical };
+enum class CalibrationKind { identity, linear, polynomial, lookup, physical, planck_wavelength };
 
 struct SourceFiles {
     std::filesystem::path data;
@@ -35,6 +35,7 @@ struct GridDescriptor {
     std::array<double, 2> index_offset{0, 0};
 };
 
+/// @note planck_wavelength 系数依次为 scale、offset、波长 μm、A、B。
 struct CalibrationDescriptor {
     CalibrationKind kind = CalibrationKind::identity;
     SourceRole source = SourceRole::data;
@@ -76,8 +77,15 @@ struct SwathGeometry {
     Raster<float> latitude;
     Raster<float> longitude;
     Raster<std::uint8_t> valid;
+    /// @brief 每个独立扫描的行数；0 表示连续网格。
+    std::size_t scan_rows = 0;
+    /// @brief 子窗第一行在原始扫描栅格中的行号。
+    std::size_t first_source_row = 0;
     void validate() const;
 };
+
+/// @brief 提取扫描几何子窗并保留原始扫描行偏移。
+SwathGeometry subset_swath_geometry(const SwathGeometry& geometry,Window window);
 
 /// @note 扫描角按 [东西, 南北] 排列，步长分别沿列、行增加。
 struct NativeDiskGeometry {
