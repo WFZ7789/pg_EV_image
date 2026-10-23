@@ -123,7 +123,6 @@ void annotations(cv::Mat& canvas,const MapView& view,const LayoutTransform& layo
                              std::clamp(color.red,0.0,1.0) * 255);
         cv::line(canvas,{bar_x,row},{width - 1,row},bgr);
     }
-    cv::rectangle(canvas,{bar_x,0},{width - 1,height - 1},white,std::max(1,x(1)));
     std::ostringstream label;
     label << std::scientific << std::setprecision(2) << float(display.scale.high);
     text(label.str(),{bar_x - margin + x(40),x(50)},1.5,std::max(1,x(3)));
