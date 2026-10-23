@@ -192,8 +192,8 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
     } else if (mode == "TSG") units = {"degree"};
     else if (mode == "RT") {
         if (!metimage) allowed(satellite,{"FY-3D","FY-3F","FY-3H"});
-        if (!request.color.empty() && request.color != "linear" && request.color != "srgb" && request.color != "contrast")
-            throw std::invalid_argument("RT curve must be linear, srgb or contrast");
+        if (!request.color.empty() && request.color != "gamma05" && request.color != "linear" && request.color != "srgb" && request.color != "contrast")
+            throw std::invalid_argument("RT curve must be gamma05, linear, srgb or contrast");
         ids = {metimage ? 0 : 1,metimage ? 1 : 2,metimage ? 2 : 3,
                sensors::solar_zenith,sensors::solar_azimuth,sensors::satellite_zenith,sensors::satellite_azimuth};
         units = {"1","1","1"};
@@ -379,9 +379,10 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
                 if (!std::isfinite(low)) throw std::invalid_argument("RT has no valid reflection samples at or below 2.5");
                 output.display.scale = {low,high == low ? low + 1 : high};
                 output.display.balanced_rgb = true;
-                output.display.mapper = [curve = request.color.empty() ? std::string("contrast") : request.color](std::span<const float> values,const DisplayScale& scale) {
+                output.display.mapper = [curve = request.color.empty() ? std::string("gamma05") : request.color](std::span<const float> values,const DisplayScale& scale) {
                     const auto normalize = [&](float value,std::size_t channel) {
                         float result = float(std::clamp((value * scale.rgb_gain[channel] - scale.low) / (scale.high - scale.low),0.0,1.0));
+                        if (curve == "gamma05") return std::sqrt(result);
                         if (curve == "contrast") result = result * result * (3 - 2 * result);
                         return curve == "linear" ? result : encode_component(result);
                     };

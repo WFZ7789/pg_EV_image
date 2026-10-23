@@ -55,7 +55,9 @@ def main():
         black_report = json.loads(Path(str(outputs["RTBlack"]) + ".profile.json").read_text())
         check(black_report["phases"]["rayleigh"]["calls"] == 1 and
               black_report["phases"]["white_balance"]["calls"] == 1, "RTBlack correction was skipped")
-        for curve in ("linear", "srgb"):
+        contrast_output, _ = render("RTBlack", "RTBlack-contrast", extras=("-c", "contrast"))
+        check(digest(contrast_output) == digest(outputs["RTBlack"]), "RTBlack default is not contrast")
+        for curve in ("linear", "srgb", "gamma05"):
             output, _ = render("RTBlack", "RTBlack-" + curve, extras=("-c", curve))
             check(digest(output) != digest(outputs["RTBlack"]), "RTBlack curve was ignored")
         render("RTBlack", "ghi-black", sensor="ghi", expected=2)

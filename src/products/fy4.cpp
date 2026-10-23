@@ -175,7 +175,8 @@ DisplayDescriptor rtblack_display(std::span<ScalarPlane> bgr,const ScalarPlane& 
         for (auto& value : rgb_values) {
             value *= peak > 0 ? mapped / peak : 1;
             if (curve == "contrast") value = value * value * (3 - 2 * value);
-            if (curve != "linear") value = value <= 0.0031308f ? 12.92f * value : 1.055f * std::pow(value,1.0f / 2.4f) - 0.055f;
+            if (curve == "gamma05") value = std::sqrt(value);
+            else if (curve != "linear") value = value <= 0.0031308f ? 12.92f * value : 1.055f * std::pow(value,1.0f / 2.4f) - 0.055f;
         }
         return rgb(rgb_values[0],rgb_values[1],rgb_values[2]);
     };
@@ -233,8 +234,8 @@ ProductDefinition fy4_product(const SensorMetadata& metadata,std::span<const Ban
         if (auxiliary) ids.push_back(sensors::auxiliary_band_offset + 1);
     } else throw std::invalid_argument("Unknown FY4 product: " + mode);
     if (mode == "RTBlack" && !request.color.empty() && request.color != "contrast" &&
-        request.color != "srgb" && request.color != "linear")
-        throw std::invalid_argument("RTBlack display curve must be contrast, srgb or linear");
+        request.color != "srgb" && request.color != "linear" && request.color != "gamma05")
+        throw std::invalid_argument("RTBlack display curve must be gamma05, contrast, srgb or linear");
     const bool reflection = mode != "E" && mode != "Rr" && mode != "EC";
     if (reflection && !metadata.numeric_attributes.contains("earth_sun_distance_au"))
         throw std::invalid_argument("FY4 reflection product needs Earth-Sun distance ratio");

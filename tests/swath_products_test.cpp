@@ -202,20 +202,24 @@ int main() {
             catch (const std::invalid_argument&) { rejected = true; }
             require(rejected);
         }
-        for (const std::string curve : {"srgb","contrast"}) {
-            auto program = fy::products::mersi_product(metadata,session.bands(),{.mode = "RT",.color = curve});
+        for (bool mosaic : {false,true}) for (const std::string curve : {"","gamma05","srgb","contrast"}) {
+            auto program = fy::products::mersi_product(metadata,session.bands(),{.mode = "RT",.color = curve,.mosaic = mosaic});
             auto product = program.prepare(inputs(),geometry,context);
+            const bool gamma = curve.empty() || curve == "gamma05";
             const std::array<float,3> middle{0.5f,0.5f,0.5f};
             const auto color = product.display.mapper(middle,{0,1});
-            require(std::abs(color.red - 0.73535698) < 1e-6 && color.red == color.green && color.green == color.blue);
+            require(std::abs(color.red - (gamma ? std::sqrt(0.5) : 0.73535698)) < 1e-6 && color.red == color.green && color.green == color.blue);
             double previous = -1;
             for (int i = 0; i <= 512; ++i) {
                 const float value = float(i) / 512;
                 const std::array<float,3> sample{value,value,value};
                 const auto mapped = product.display.mapper(sample,{0,1});
                 require(std::isfinite(mapped.red) && mapped.red >= previous && mapped.red >= 0 && mapped.red <= 1);
+                if (gamma) require(std::abs(mapped.red - std::sqrt(value)) < 1e-6);
                 previous = mapped.red;
             }
+            const auto extremes = product.display.mapper(std::array<float,3>{-1,0,2},{0,1});
+            require(std::abs(extremes.red - 1) < 1e-6 && extremes.green == 0 && extremes.blue == 0);
         }
     }
     {

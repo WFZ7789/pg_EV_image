@@ -86,33 +86,36 @@ void check_rtblack(core::SensorSession& session,core::ExecutionContext& context)
     require(definition.plan.inputs[4].cyclic_degrees && definition.plan.inputs[6].cyclic_degrees);
     require(!definition.plan.inputs[3].cyclic_degrees && !definition.plan.inputs[5].cyclic_degrees);
     const auto shape = metadata.grid("native").shape;
-    std::vector<core::ScalarPlane> inputs;
-    for (std::size_t channel = 0; channel < 7; ++channel) {
-        inputs.push_back({channel < 3 ? "1" : "degree",core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)});
-        std::ranges::fill(inputs.back().values.values(),channel < 3 ? 1.0f : 0.0f);
-        std::ranges::fill(inputs.back().valid.values(),1);
-    }
-    for (std::size_t channel = 0; channel < 3; ++channel) inputs[channel].values.values()[0] = 0;
-    inputs[3].values.values()[1] = 90;
-    inputs[5].values.values()[2] = 90;
-    inputs[6].valid.values()[3] = 0;
-    inputs[1].valid.values()[4] = 0;
-    inputs[2].values.values()[5] = 2.6f;
-    inputs[4].values.values()[6] = NAN;
-    inputs[0].values.values()[7] = 0.08f;
-    inputs[1].values.values()[7] = 0.02f;
-    inputs[2].values.values()[7] = 0.04f;
-    for (std::size_t channel = 0; channel < 3; ++channel) {
-        inputs[channel].values.values()[9] = 0.5f;
-        inputs[channel].values.values()[10] = 1.4f;
-        inputs[channel].values.values()[11] = 0.1f;
-    }
-    inputs[3].values.values()[11] = 89;
-    inputs[5].values.values()[12] = 89;
-    inputs[5].values.values()[13] = 85;
-    inputs[5].values.values()[14] = 70;
+    auto inputs = [&] {
+        std::vector<core::ScalarPlane> planes;
+        for (std::size_t channel = 0; channel < 7; ++channel) {
+            planes.push_back({channel < 3 ? "1" : "degree",core::Raster<float>(shape),core::Raster<std::uint8_t>(shape)});
+            std::ranges::fill(planes.back().values.values(),channel < 3 ? 1.0f : 0.0f);
+            std::ranges::fill(planes.back().valid.values(),1);
+        }
+        for (std::size_t channel = 0; channel < 3; ++channel) planes[channel].values.values()[0] = 0;
+        planes[3].values.values()[1] = 90;
+        planes[5].values.values()[2] = 90;
+        planes[6].valid.values()[3] = 0;
+        planes[1].valid.values()[4] = 0;
+        planes[2].values.values()[5] = 2.6f;
+        planes[4].values.values()[6] = NAN;
+        planes[0].values.values()[7] = 0.08f;
+        planes[1].values.values()[7] = 0.02f;
+        planes[2].values.values()[7] = 0.04f;
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            planes[channel].values.values()[9] = 0.5f;
+            planes[channel].values.values()[10] = 1.4f;
+            planes[channel].values.values()[11] = 0.1f;
+        }
+        planes[3].values.values()[11] = 89;
+        planes[5].values.values()[12] = 89;
+        planes[5].values.values()[13] = 85;
+        planes[5].values.values()[14] = 70;
+        return planes;
+    };
     const auto geometry = std::make_shared<core::NativeGeometry>(session.read_geometry("native",{0,0,shape}));
-    const auto product = definition.prepare(std::move(inputs),geometry,context);
+    const auto product = definition.prepare(inputs(),geometry,context);
     require(product.frame.name == "RTBlack" && product.frame.planes.size() == 3 && product.display.balanced_rgb);
     for (const auto& plane : product.frame.planes) {
         require(plane.valid.values()[0] && plane.values.values()[0] == 0);
@@ -140,6 +143,23 @@ void check_rtblack(core::SensorSession& session,core::ExecutionContext& context)
     const auto bright = product.display.mapper(std::array<float,3>{1.5f,1.5f,1.5f},scale);
     const auto brighter = product.display.mapper(std::array<float,3>{2.0f,2.0f,2.0f},scale);
     require(bright.red > white.red && brighter.red > bright.red && brighter.red < 1);
+    for (const std::string curve : {"","gamma05","linear","srgb","contrast"}) {
+        request.color = curve;
+        const auto variant = fy::products::fy4_product(metadata,session.bands(),request).prepare(inputs(),geometry,context);
+        const bool gamma = curve == "gamma05";
+        double previous = -1;
+        for (int i = 0; i <= 1024; ++i) {
+            const float value = float(i) / 512;
+            const auto color = variant.display.mapper(std::array<float,3>{value,value,value},{0,1});
+            require(std::isfinite(color.red) && color.red >= previous && color.red >= 0 && color.red <= 1);
+            require(color.red == color.green && color.green == color.blue);
+            if (gamma) {
+                const double mapped = value <= 0.7 ? value : 0.7 + 0.3 * (1 - std::exp(-(value - 0.7) / 0.3));
+                require(std::abs(color.red - std::sqrt(mapped)) < 1e-6);
+            }
+            previous = color.red;
+        }
+    }
     require(product.labels[4].find("RTBlack") != std::string::npos);
     auto missing = session.bands();
     std::erase_if(missing,[](const auto& band) { return band.id == fy::sensors::satellite_azimuth; });
