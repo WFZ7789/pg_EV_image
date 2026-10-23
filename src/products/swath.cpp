@@ -405,7 +405,8 @@ ProductDefinition mersi_product(const SensorMetadata& metadata, std::span<const 
             auto workspace = context.profile().reserve(BufferKind::statistics,shape.elements() * 2 * (sizeof(float) + sizeof(std::uint8_t)));
             const auto* swath = std::get_if<SwathGeometry>(geometry.get());
             auto shade = shadow(inputs[infrared_index],inputs[zenith_index],inputs[azimuth_index],context,shadow_distance,
-                metimage && swath ? swath->scan_rows : 0,metimage && swath ? swath->first_source_row : 0);
+                metimage && swath ? swath->scan_rows : 0,metimage && swath ? swath->first_source_row : 0,
+                metimage ? swath : nullptr);
             if (mode == "ECT") {
                 /// @note 亮度只由亮温决定；雾与卷云只旋转色相，等亮度混合避免温度误读。
                 const auto& palette = moon_palette();

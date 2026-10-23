@@ -5,6 +5,7 @@
 #include "products/swath.hpp"
 #include "products/palette.hpp"
 #include "products/phys.hpp"
+#include "scan_sampling.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -107,8 +108,12 @@ inline std::vector<std::string> labels(const SensorMetadata& metadata, const std
 }
 
 inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zenith, const ScalarPlane& azimuth,
-                    ExecutionContext& context, int pixel_distance = 1,std::size_t scan_rows = 0,std::size_t first_row = 0) {
+                    ExecutionContext& context, int pixel_distance = 1,std::size_t scan_rows = 0,std::size_t first_row = 0,
+                    const SwathGeometry* geometry = nullptr) {
     const auto shape = temperature.values.shape();
+    std::optional<ScanTemperatureSampler> sampler;
+    if (geometry && geometry->scan_rows) sampler.emplace(temperature,*geometry);
+    auto scan_memory = context.profile().reserve(BufferKind::statistics,sampler ? sampler->bytes() : 0);
     double average_zenith = 0, average_azimuth = 0, count = 0;
     for (std::size_t i = 0; i < shape.elements(); ++i)
         if (zenith.valid.values()[i] && azimuth.valid.values()[i] && zenith.values.values()[i] > 0 &&
@@ -134,7 +139,11 @@ inline ScalarPlane shadow(const ScalarPlane& temperature, const ScalarPlane& zen
                     const int dy = static_cast<int>(std::sin(angle) * scale * pixel_distance);
                     const auto r = static_cast<std::int64_t>(row) + dy, c = static_cast<std::int64_t>(col) + dx;
                     float shifted = scan_rows ? temperature.values.values()[index] : 0;
-                    if (r >= 0 && c >= 0 && r < static_cast<std::int64_t>(shape.rows) && c < static_cast<std::int64_t>(shape.cols)) {
+                    if (sampler) {
+                        const auto sample = sampler->offset(row,col,dy,dx);
+                        if (!sample) continue;
+                        shifted = *sample;
+                    } else if (r >= 0 && c >= 0 && r < static_cast<std::int64_t>(shape.rows) && c < static_cast<std::int64_t>(shape.cols)) {
                         const auto neighbor = static_cast<std::size_t>(r) * shape.cols + static_cast<std::size_t>(c);
                         if (scan_rows && ((first_row+row)/scan_rows != (first_row+std::size_t(r))/scan_rows ||
                             !temperature.valid.values()[neighbor])) continue;
