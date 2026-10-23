@@ -240,6 +240,44 @@ int main() {
         }
     }
     {
+        SwathGeometry geometry{Raster<float>({48,8}),Raster<float>({48,8}),Raster<std::uint8_t>({48,8}),24,0};
+        std::fill(geometry.valid.values().begin(),geometry.valid.values().end(),1);
+        for (std::size_t row = 0; row < 48; ++row)
+            for (std::size_t col = 0; col < 8; ++col) {
+                const double y = row + .5 - (row/24)*.8;
+                geometry.latitude.view().at(row,col) = float(60-y*.01);
+                geometry.longitude.view().at(row,col) = float(120+(col+.5+y*.1)*.01);
+            }
+        const MapView map{{false,0,120},{120,120.16,59.52,60},{48,16}};
+        std::vector<ProjectedSwath> projected;
+        projected.reserve(2);
+        Raster<float> values({24,8}); Raster<std::uint8_t> valid({24,8});
+        std::fill(values.values().begin(),values.values().end(),1);
+        std::fill(valid.values().begin(),valid.values().end(),1);
+        std::vector<SwathRasterSource> sources;
+        for (std::size_t row : {0,24}) {
+            auto strip = subset_swath_geometry(geometry,{row,0,{24,8}});
+            projected.push_back(project_swath(strip,map,context));
+            DisplayDescriptor display;
+            display.mapper = [](std::span<const float>,const DisplayScale&) { return Color{1,1,1}; };
+            sources.push_back({{24,8},projected.back().vertices.view(),{values.view()},{valid.view()},std::move(display),row});
+        }
+        auto configured = options(map.pixels);
+        configured.overlap = OverlapPolicy::scan_center;
+        auto result = rasterize_swaths(sources,configured,context);
+        for (std::size_t row = 22; row <= 25; ++row)
+            for (std::size_t col = 5; col <= 7; ++col) {
+                require(result.coverage->view().at(row,col) > .9999f);
+                require(std::get<Raster<Pixel8>>(result.pixels).view().at(row,col).bgr ==
+                        std::array<std::uint8_t,3>{255,255,255});
+            }
+        Raster<std::uint8_t> missing_valid({24,8});
+        sources[1].valid = {missing_valid.view()};
+        auto missing = rasterize_swaths(sources,configured,context);
+        require(missing.coverage->view().at(10,6) > .9999f);
+        require(missing.coverage->view().at(26,6) == 0);
+    }
+    {
         SwathGeometry geometry{Raster<float>({3,3},{0,0,0,1,1,1,2,2,2}),
                                Raster<float>({3,3},{0,1,2,0,1,2,0,1,2}),Raster<std::uint8_t>({3,3},{1,1,1,1,1,1,1,1,1})};
         MapView map{{false,0,0},{0,2,0,2},{4,4}};

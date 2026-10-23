@@ -541,16 +541,24 @@ ProjectedSwath project_swath(const SwathGeometry& geometry, const MapView& view,
         };
         project_row(begin ? begin - 1 : 0, upper);
         project_row(std::min(begin, shape.rows - 1), lower);
+        const bool scan_edges = geometry.scan_rows && shape.rows > 1;
+        if (scan_edges && begin == 0) project_row(1, upper);
         for (auto row = begin; row < end; ++row) {
+            if (scan_edges && row == shape.rows) project_row(shape.rows - 2, lower);
+            /// @note 扫描首尾由同一扫描内的相邻中心外推半个像元，保留完整覆盖范围。
+            const double upper_weight = scan_edges && row == 0 ? -1 : scan_edges && row == shape.rows ? 3 : 1;
+            const double lower_weight = 2 - upper_weight;
             for (std::size_t col = 0; col <= shape.cols; ++col) {
                 const auto left = col ? col - 1 : 0, right = std::min(col, shape.cols - 1);
                 const std::array<MapPoint,4> points{upper[left],upper[right],lower[left],lower[right]};
                 double x = 0, y = 0;
                 double min_x = std::numeric_limits<double>::infinity(), max_x = -min_x;
                 bool valid = true;
-                for (const auto& point : points) {
+                for (std::size_t i = 0; i < points.size(); ++i) {
+                    const auto& point = points[i];
                     valid = valid && point.valid;
-                    x += point.x; y += point.y;
+                    const auto weight = i < 2 ? upper_weight : lower_weight;
+                    x += point.x * weight; y += point.y * weight;
                     min_x = std::min(min_x, point.x); max_x = std::max(max_x, point.x);
                 }
                 if (!view.projection.orthographic && max_x - min_x > 180) valid = false;
